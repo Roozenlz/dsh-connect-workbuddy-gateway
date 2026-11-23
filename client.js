@@ -58,6 +58,17 @@ window.__ModuleLoader__.load({
         healthStale: '尚未读到上游账号状态',
         brokenSelections: '其中 {n} 个模型所用的账号当前不可用，请求会失败；账号恢复后会自动生效。',
         autoRefresh: '每 30 秒自动刷新',
+        storage: '存储位置',
+        storageHint: 'API key 与模型勾选存在这个目录的 keys.json 里。留空则用默认目录。',
+        storageCurrent: '当前目录',
+        storageFile: '配置文件',
+        storageDefault: '默认',
+        storagePlaceholder: '留空 = 默认（{name}）',
+        storageHintRelative: '相对路径基于 DSH 主目录；也可以填绝对路径。',
+        storageSave: '保存目录',
+        storageSaved: '已保存，插件会重新加载以生效',
+        storageWarn: '换目录后，原目录里的 key 不会自动带过来。',
+        storageEmptyUses: '留空时使用默认目录：',
         selected: '已选',
         noneSelected: '还没有勾选任何模型，这把 key 暂时不能用。',
         willExpose: '客户端会看到',
@@ -115,6 +126,17 @@ window.__ModuleLoader__.load({
         healthStale: 'No upstream account state yet',
         brokenSelections: '{n} of these models use an account that is unavailable right now, so requests will fail until it recovers.',
         autoRefresh: 'Refreshes every 30 s',
+        storage: 'Storage',
+        storageHint: 'API keys and model selections live in keys.json under this directory. Leave empty for the default.',
+        storageCurrent: 'Current directory',
+        storageFile: 'Config file',
+        storageDefault: 'default',
+        storagePlaceholder: 'Empty = default ({name})',
+        storageHintRelative: 'A relative path is resolved against the DSH home; an absolute path is used as-is.',
+        storageSave: 'Save directory',
+        storageSaved: 'Saved; the plugin reloads to apply it',
+        storageWarn: 'Keys in the previous directory are not copied over.',
+        storageEmptyUses: 'Empty uses the default directory:',
         selected: 'selected',
         noneSelected: 'No models ticked yet, so this key cannot be used.',
         willExpose: 'The client will see',
@@ -656,6 +678,91 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /* ── 存储位置 ───────────────────────────────────────────────────── */
+
+    /**
+     * 配置目录卡片：显示当前目录，允许改成任意路径。
+     *
+     * 「留空」和「填具体值」在这里是两种语义，界面上要说清：
+     *   留空  → 跟随默认（目录名与包名一致），升级/换机器都不用管
+     *   有值  → 用你指定的那个目录，相对路径基于 DSH 主目录
+     */
+    function StorageCard({ state, t, onSave }) {
+      const paths = state?.paths ?? {}
+      const [value, setValue] = useState(
+        paths.dataDirIsDefault === false && typeof paths.dataDir === 'string' ? paths.dataDir : '',
+      )
+      const [busy, setBusy] = useState(false)
+      const [error, setError] = useState(undefined)
+      const [saved, setSaved] = useState(false)
+
+      /* 外部刷新（每 30 秒）回来时，如果用户没在编辑就跟着更新。 */
+      useEffect(() => {
+        if (busy || saved) return
+        setValue(paths.dataDirIsDefault === false && typeof paths.dataDir === 'string' ? paths.dataDir : '')
+      }, [paths.dataDir, paths.dataDirIsDefault])
+
+      const commit = async () => {
+        setBusy(true)
+        setError(undefined)
+        try {
+          await onSave(value)
+          setSaved(true)
+          setTimeout(() => setSaved(false), 4000)
+        } catch (caught) {
+          setError(String(caught.message ?? caught))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const defaultName = paths.defaultDataDirName ?? 'dsh-connect-workbuddy-gateway'
+
+      return h('div', { className: 'wbg-card wbg-card-soft' },
+        h('div', { className: 'wbg-row' },
+          h('strong', { className: 'wbg-sec-title' }, t.storage),
+          h('span', { className: 'wbg-spacer' }),
+          h('span', { className: 'wbg-caption' }, t.storageHint),
+        ),
+
+        h('div', { className: 'wbg-field' },
+          h('span', null, t.storageCurrent),
+          h('code', { className: 'wbg-mono', style: { wordBreak: 'break-all' } }, paths.dataDir ?? '(resolving)'),
+        ),
+        h('p', { className: 'wbg-caption' },
+          `${t.storageFile}: ${paths.configPath ?? ''}`),
+
+        h('div', { className: 'wbg-field' },
+          h('span', null, t.storageHintRelative),
+          h('input', {
+            className: 'wbg-input',
+            value,
+            placeholder: t.storagePlaceholder.replace('{name}', defaultName),
+            'aria-label': t.storage,
+            onChange: (event) => setValue(event.target.value),
+          }),
+        ),
+
+        h('p', { className: 'wbg-caption' }, `${t.storageEmptyUses} ${defaultName}`),
+        h('p', { className: 'wbg-warn' }, t.storageWarn),
+
+        error === undefined ? null : h('div', { className: 'wbg-alert wbg-alert-error' },
+          h('span', { className: 'wbg-alert-icon', 'aria-hidden': true }, '!'),
+          h('span', { className: 'wbg-alert-body' }, error)),
+
+        h('div', { className: 'wbg-row' },
+          saved ? h('span', { className: 'wbg-caption' }, t.storageSaved) : null,
+          h('span', { className: 'wbg-spacer' }),
+          h('button', {
+            type: 'button',
+            className: 'wbg-btn wbg-btn-primary',
+            onClick: commit,
+            disabled: busy,
+          }, t.storageSave),
+        ),
+      )
+    }
+
     /* ── 页面 ───────────────────────────────────────────────────────── */
 
     function GatewaySection() {
@@ -723,6 +830,18 @@ window.__ModuleLoader__.load({
       }, [reload])
 
       const revealKey = useCallback((id) => adminPost('/keys/reveal', { id }), [])
+
+      /*
+       * 保存配置目录。
+       *
+       * 它进的是**插件配置**（`cordis.patch.yml` 的那一行），不是 keys.json ——
+       * 让 keys.json 描述「keys.json 自己在哪」是自相矛盾的。保存后宿主会重启
+       * 这个插件，`apply` 读到的就是新值。
+       */
+      const saveDataDir = useCallback(async (dataDir) => {
+        await adminPost('/config/data-dir', { dataDir })
+        await reload()
+      }, [reload])
 
       if (state === undefined) {
         return h('div', { className: 'wbg' },
@@ -816,8 +935,9 @@ window.__ModuleLoader__.load({
           h('strong', { className: 'wbg-sec-title' }, t.guide),
           h('p', { className: 'wbg-hint' }, t.guideHint),
           h('pre', { className: 'wbg-code wbg-mono' }, curlExample),
-          h('p', { className: 'wbg-caption' }, `${t.configPath}: ${state.configPath}`),
         ),
+
+        h(StorageCard, { state, t, onSave: saveDataDir }),
 
         created === undefined ? null : h(SecretDialog, {
           secret: created,

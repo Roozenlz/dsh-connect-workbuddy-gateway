@@ -19,7 +19,7 @@
 import { registerRoutes, baseUrlOf } from './src/routes.js'
 import { workbuddyProviders } from './src/backend.js'
 import { closeDirect } from './src/direct.js'
-import { readConfig, writeConfig, makeKey, normalizeSelections, configPath } from './src/config.js'
+import { readConfig, writeConfig, makeKey, normalizeSelections, configPath, useDataDir } from './src/config.js'
 import { catalogForSettings } from './src/models.js'
 
 export const name = 'workbuddy-gateway'
@@ -28,6 +28,16 @@ export const name = 'workbuddy-gateway'
 export const inject = ['webServer']
 
 const DEFAULTS = {
+  /**
+   * 配置目录。
+   *
+   * 空字符串表示「用默认」——`$DSH_HOME/dsh-connect-workbuddy-gateway/`，目录名与
+   * 包名一致，用户找得到。相对路径相对 `$DSH_HOME`，绝对路径原样使用。
+   *
+   * `keys.json` 落在这个目录里。改它会换一个数据文件——**旧目录里的 key 不会跟
+   * 过来**，所以设置页在保存后会把这件事说清楚。
+   */
+  dataDir: '',
   /** 关闭国际版区域（只服务国内区）。 */
   enableGlobal: true,
   /**
@@ -47,6 +57,14 @@ const DEFAULTS = {
  */
 export function apply(ctx, config) {
   const settings = { ...DEFAULTS, ...(config ?? {}) }
+
+  /*
+   * **第一件事：定下数据目录。** 后面所有 readConfig / writeConfig 都用它。
+   * 必须在建默认 key 之前，否则会先往默认目录写一份、再切到用户指定的目录，
+   * 用户看到的就是「设了目录但里面是空的」。
+   */
+  const dataDir = useDataDir(settings.dataDir)
+  settings.resolvedDataDir = dataDir
 
   /*
    * 首次启动建一把默认 key，并**把所有可见模型都勾上** —— 用户拿到的 key 立刻
@@ -69,6 +87,14 @@ export function apply(ctx, config) {
     ctx,
     config: settings,
     logger: ctx.logger,
+    /*
+     * 本插件在 profile 里的 Loader 条目 id。
+     *
+     * 设置页要保存 `dataDir` 时，`settings.update(ns, ...)` 用的就是这个 id ——
+     * 宿主按**精确匹配**查表（`include:workbuddy-gateway` 这种，不是包名）。
+     * 取不到时留空，让保存路径老实报错，而不是写到别的条目上。
+     */
+    entryId: ctx.fiber?.entry?.options?.id ?? '',
     /*
      * provider 路由每次请求现读：用户可能在设置里关掉一个区域，或让
      * dsh-connect-workbuddy 重新注册（HMR）。采样一次会把「刚启用」的区域

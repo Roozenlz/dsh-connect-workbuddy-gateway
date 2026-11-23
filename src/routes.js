@@ -20,7 +20,19 @@ import { handleResponses } from './openai-responses.js'
 import { handleMessages } from './anthropic.js'
 import { handleGenerate, parseGeminiPath, geminiCatalog } from './gemini.js'
 import { collectModels, directModelsByRegion, openAiCatalog, anthropicCatalog, catalogForSettings } from './models.js'
-import { readConfig, writeConfig, makeKey, normalizeSelections, normalizeConfig, newSecret, maskSecret } from './config.js'
+import {
+  readConfig,
+  writeConfig,
+  makeKey,
+  normalizeSelections,
+  normalizeConfig,
+  newSecret,
+  maskSecret,
+  configPath,
+  activeDataDirPath,
+  isDefaultDataDir,
+  DEFAULT_DATA_DIR_NAME,
+} from './config.js'
 import { buildCatalog, safeSuffixOf } from './catalog.js'
 import { allAccounts } from './accounts.js'
 import { regionOfProvider, providerOfRegion } from './resolve.js'
@@ -310,6 +322,94 @@ async function dispatchAdmin(req, res, ctx, env) {
       sendJson(res, 200, { keys: publicKeys(config, env), secret: target.secret })
       return
     }
+    if (method === 'POST' && path === '/config/data-dir') {
+      /*
+       * 改配置目录。
+       *
+       * **不能只写进 keys.json** —— 那个文件就在被指向的目录里，改它等于让一个新
+       * 文件去描述「以后该读哪个文件」，自相矛盾。所以这项写进插件配置
+       * （`cordis.patch.yml` 的那一行），由 settings 服务落盘，插件下次激活时
+       * `apply` 读到的就是新值。
+       *
+       * 这里只做校验与说明，真正的写入交给宿主。
+       */
+      const body = await readJsonBody(req)
+      const requested = typeof body?.dataDir === 'string' ? body.dataDir.trim() : ''
+
+      /* 相对路径要能被解析成绝对路径，否则运行时会拼出一个诡异位置。 */
+      if (requested !== '' && !isResolvablePath(requested)) {
+        sendJson(res, 400, { error: `"${requested}" is not a usable directory path` })
+        return
+      }
+
+      const settings = ctx.get('settings')
+      if (settings === undefined) {
+        sendJson(res, 503, { error: 'this profile cannot save plugin configuration' })
+        return
+      }
+      /*
+       * 找到能落盘这条配置的地方。
+       *
+       * 两条路都试，顺序有讲究：
+       *
+       *   1. `configEditor.edit(entry, ...)` —— 本插件最该用的那条。它认得这一行，
+       *      保留 patch 里其它内容与注释，并且会重启插件让改动生效。
+       *   2. `settings.update(ns, ...)` —— 只在插件注册了设置页时可用。本插件
+       *      **没有**注册（`describe()` 里找不到它），所以这条基本走不通，保留是为了
+       *      将来加了设置页时自动能用上。
+       *
+       * 都不行就如实报错，让用户去改 patch —— 绝不自己去重写 cordis.patch.yml，
+       * 那个文件属于用户，里面有别人的行和注释。
+       */
+      const ownEntry = ctx.fiber?.entry
+      const editor = ctx.get('configEditor')
+      if (ownEntry !== undefined && editor?.edit !== undefined) {
+        try {
+          await editor.edit(ownEntry, (current) => ({ ...current, dataDir: requested }))
+          sendJson(res, 200, { ok: true, requested, via: 'configEditor' })
+          return
+        } catch (error) {
+          sendJson(res, 500, {
+            error: `could not save dataDir: ${error instanceof Error ? error.message : String(error)}`,
+            via: 'configEditor',
+          })
+          return
+        }
+      }
+
+      const configService = ctx.get('settings')
+      if (configService === undefined) {
+        sendJson(res, 503, { error: 'this profile cannot save plugin configuration; set dataDir in the profile patch instead' })
+        return
+      }
+      const ns = resolveSettingsNs(configService, env, PACKAGE_NAME)
+      if (ns === undefined) {
+        sendJson(res, 503, {
+          error: 'this plugin is not registered as a configurable entry in this profile; set dataDir in the profile patch by hand',
+          entryId: env.entryId ?? null,
+        })
+        return
+      }
+      try {
+        await configService.update(ns, { dataDir: requested })
+      } catch (error) {
+        sendJson(res, 500, { error: `could not save: ${error instanceof Error ? error.message : String(error)}` })
+        return
+      }
+
+      /*
+       * 如实告诉用户发生了什么：新目录**不会**自动继承旧 key。与其让他下次打开
+       * 设置页发现 key 全空，不如现在就说。
+       */
+      const nextDir = requested === '' ? null : requested
+      sendJson(res, 200, {
+        ok: true,
+        requested,
+        note: 'the plugin reloads to apply this; keys in the previous directory are not copied over',
+        ...(nextDir === null ? {} : { pendingDataDir: nextDir }),
+      })
+      return
+    }
     if (method === 'POST' && path === '/config/reset') {
       const config = readConfig()
       if (config.keys.length === 0) {
@@ -367,7 +467,7 @@ async function adminState(ctx, env) {
     /* 根地址就是 DSH 自己的地址，不带自定义前缀。 */
     baseUrl: origin,
     endpoints: describeEndpoints(origin).endpoints,
-    configPath: configPathOf(),
+    paths: configPathOf(env),
     providers: env.providers().map((provider) => ({
       id: provider,
       region: regionOfProvider(provider) ?? null,
@@ -552,10 +652,76 @@ export function baseUrlOf(ctx) {
   return `${originOf(ctx)}${PREFIX}`
 }
 
-function configPathOf() {
-  const home = process.env.DSH_HOME
-  const base = typeof home === 'string' && home.trim() !== '' ? home.trim() : null
-  return base === null ? 'keys.json under the DSH home' : `${base}\\workbuddy-gateway\\keys.json`
+/**
+ * 设置页展示用的路径信息。
+ *
+ * 同时给出三样东西，因为用户问的是不同的问题：
+ *   - `configPath`：实际读写的那个文件（最长的那串）
+ *   - `dataDir`：它所在的目录（可自定义的那一项）
+ *   - `dataDirIsDefault`：这个目录是不是「跟随默认」——是的话界面显示默认名，
+ *     而不是把一长串绝对路径当成用户输入回填到输入框里
+ */
+function configPathOf(env) {
+  return {
+    configPath: configPath(),
+    dataDir: activeDataDirPath(),
+    dataDirIsDefault: isDefaultDataDir(env?.config?.dataDir),
+    defaultDataDirName: DEFAULT_DATA_DIR_NAME,
+  }
+}
+
+/**
+ * 定位本插件在 settings 服务里的命名空间。
+ *
+ * 候选顺序：env 里读到的条目 id → 该 id 加 `include:` 前缀 → 按包名在
+ * describe() 里反查。**每个候选都要在 describe() 的输出里真实存在才采用** ——
+ * `settings.update` 对不存在的 ns 会抛错，而写错条目比报错更糟。
+ *
+ * @returns 可用的 ns，或 undefined
+ */
+function resolveSettingsNs(settings, env, packageName) {
+  let descriptors
+  try {
+    descriptors = settings.describe?.() ?? []
+  } catch {
+    return undefined
+  }
+  const known = new Set(
+    (Array.isArray(descriptors) ? descriptors : [])
+      .map((descriptor) => descriptor?.ns)
+      .filter((ns) => typeof ns === 'string'),
+  )
+  if (known.size === 0) return undefined
+
+  const candidates = []
+  if (typeof env?.entryId === 'string' && env.entryId !== '') {
+    candidates.push(env.entryId)
+    candidates.push(`include:${env.entryId}`)
+  }
+  /* 按包名/条目名反查：`include:dsh-connect-workbuddy-gateway` 这类。 */
+  for (const ns of known) {
+    if (ns === packageName || ns.includes(packageName)) candidates.push(ns)
+  }
+  /* 最后按本插件条目 id 的常见拼法兜底。 */
+  for (const ns of known) {
+    if (/workbuddy-gateway/u.test(ns)) candidates.push(ns)
+  }
+
+  for (const candidate of candidates) {
+    if (known.has(candidate)) return candidate
+  }
+  return undefined
+}
+
+/** 本插件的包名，用于在 settings 目录里认出自己那一行。 */
+const PACKAGE_NAME = 'dsh-connect-workbuddy-gateway'
+
+/** 跨平台的「这是个可用路径」判断（不含盘符以外的怪字符）。 */
+function isResolvablePath(value) {
+  if (value === '') return false
+  /* Windows 不允许这些字符出现在路径里；POSIX 只禁 NUL。 */
+  if (/[\u0000<>"|?*]/u.test(value)) return false
+  return true
 }
 
 function readJsonBody(req) {

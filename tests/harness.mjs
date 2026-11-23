@@ -840,6 +840,44 @@ console.log('\n== 账号恢复后必须自动回到可勾选列表 ==')
   check('又从候选移除', !(again.body.available ?? []).some((row) => row.accountId === 'acct_pony'), 'still in candidates')
 }
 
+console.log('\n== 配置目录的解析规则 ==')
+{
+  /*
+   * 目录来自插件配置 `dataDir`，不是写死的。三种写法都要对：
+   *   空 → 默认目录（名与包名一致）
+   *   相对 → 相对 DSH 主目录（不是进程 cwd —— cwd 会因启动方式变化）
+   *   绝对 → 原样使用
+   */
+  const { resolveDataDir, DEFAULT_DATA_DIR_NAME, dshHome } = await import('../src/config.js')
+  const home = dshHome()
+
+  const empty = resolveDataDir('')
+  check('空值用默认名', empty === `${home}\\${DEFAULT_DATA_DIR_NAME}` || empty === `${home}/${DEFAULT_DATA_DIR_NAME}`, empty)
+  check('默认名等于包名', DEFAULT_DATA_DIR_NAME === 'dsh-connect-workbuddy-gateway', DEFAULT_DATA_DIR_NAME)
+
+  const rel = resolveDataDir('my-keys')
+  check('相对路径基于 DSH 主目录', rel.startsWith(home), rel)
+
+  const abs = resolveDataDir('D:\\gateway-keys')
+  check('绝对路径原样使用', abs === 'D:\\gateway-keys' || abs === 'D:/gateway-keys', abs)
+
+  /* 首尾空白要被吃掉，否则会建出一个带空格的目录名。 */
+  const padded = resolveDataDir('  my-keys  ')
+  check('忽略首尾空白', padded === rel, padded)
+}
+
+console.log('\n== 配置目录可通过设置接口读取 ==')
+{
+  const state = await adminGet('/state')
+  check('state 带 paths', state.body.paths !== undefined, JSON.stringify(state.body.paths))
+  check('给出实际目录', typeof state.body.paths?.dataDir === 'string' && state.body.paths.dataDir.length > 0, state.body.paths?.dataDir)
+  check('给出配置文件', typeof state.body.paths?.configPath === 'string' && state.body.paths.configPath.endsWith('keys.json'), state.body.paths?.configPath)
+  check('标注是否默认', typeof state.body.paths?.dataDirIsDefault === 'boolean', String(state.body.paths?.dataDirIsDefault))
+  /* 测试环境用的是默认目录（DSH_HOME 是临时目录）。 */
+  check('测试环境用默认目录', state.body.paths?.dataDirIsDefault === true, String(state.body.paths?.dataDirIsDefault))
+  check('默认目录名与包名一致', state.body.paths?.defaultDataDirName === 'dsh-connect-workbuddy-gateway', state.body.paths?.defaultDataDirName)
+}
+
 console.log('\n== OpenAI Chat 流式 + 工具 ==')
 {
   await adminPost('/keys/update', {

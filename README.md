@@ -252,15 +252,38 @@ hy4flash-free@#9       ← 昵称含中文/emoji，退化成序号
 - 每把 key：名称、启停，以及**按账号分组的模型勾选**（带搜索、全选、清空）
 - 直接列出「客户端会看到的名字」，重名后缀一目了然
 - 账号不可用时给出警告条与恢复时间
+- **存储位置**：查看并修改配置目录
 - 底部一条 `curl` 示例
 
-配置文件：
+### 存储位置
 
-```
-$DSH_HOME/workbuddy-gateway/keys.json      # 权限 600
-```
+配置目录**可以自定义**，在设置页底部的「存储位置」里改：
 
-只存本插件自己的 key 与勾选清单，**不含任何 WorkBuddy 凭据**。
+| 填什么 | 解析成 |
+|---|---|
+| 留空 | `$DSH_HOME/dsh-connect-workbuddy-gateway/`（默认，目录名与包名一致） |
+| 相对路径（`my-keys`） | `$DSH_HOME/my-keys/` |
+| 绝对路径（`D:\keys`） | 原样使用 |
+
+`keys.json` 落在这个目录里，权限 600，只存本插件自己的 key 与勾选清单，
+**不含任何 WorkBuddy 凭据**。
+
+两项注意：
+
+- **换目录不会搬数据。** 原目录里的 key 仍在原目录，新的空目录里没有它们。设置页
+  保存时会明确提示这一点。
+- 改这一项写进的是**插件配置**（profile 的 `cordis.patch.yml`），不是 `keys.json`
+  —— 让 `keys.json` 描述「`keys.json` 自己在哪」是自相矛盾的。插件会重启一次来
+  应用新值。
+
+也可以直接改 profile 里的那一行：
+
+```yaml
+- id: workbuddy-gateway
+  name: dsh-connect-workbuddy-gateway
+  config:
+    dataDir: D:\keys          # 留空或删掉这一行 = 用默认
+```
 
 ---
 
@@ -331,7 +354,7 @@ $DSH_HOME/workbuddy-gateway/keys.json      # 权限 600
 node tests/harness.mjs
 ```
 
-覆盖 165 项：首次建 key 与惰性补选、鉴权、模型勾选与清单投影、重名后缀（区域 / 昵称 /
+覆盖 176 项：首次建 key 与惰性补选、鉴权、模型勾选与清单投影、重名后缀（区域 / 昵称 /
 非 ASCII 序号）、跨区同名、按名字路由、推理档透传、并行工具调用按 index 分组、
 Responses 流的规范校验（`sequence_number`、part 一致性、terminal 的 output 顺序）、
 上游失败与断流的诚实报告、账号可用性与恢复、四种协议的流式与非流式、工具调用三方言、

@@ -34,15 +34,91 @@
 import { randomBytes } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 export const CONFIG_VERSION = 2
 
+/**
+ * 默认数据目录名 —— 与仓库/包名一致。
+ *
+ * 用户看得懂「dsh-connect-workbuddy-gateway 这个插件的数据在哪个目录」，
+ * 而 `workbuddy-gateway` 这种简称会让人找不到。
+ */
+export const DEFAULT_DATA_DIR_NAME = 'dsh-connect-workbuddy-gateway'
+
+/** DSH 主目录。 */
+export function dshHome() {
+  const home = process.env.DSH_HOME
+  return typeof home === 'string' && home.trim() !== '' ? home.trim() : join(homedir(), '.dsh')
+}
+
+/**
+ * 把配置项里的 `dataDir` 解析成绝对目录。
+ *
+ * 三种写法：
+ *   - 绝对路径（`D:\my-keys` 或 `/opt/keys`）→ 原样使用
+ *   - 相对路径（`my-keys`）→ 相对 DSH 主目录
+ *   - 空/未设 → `$DSH_HOME/dsh-connect-workbuddy-gateway`
+ *
+ * @param configured 插件配置里的 `dataDir`
+ */
+export function resolveDataDir(configured) {
+  const raw = typeof configured === 'string' ? configured.trim() : ''
+
+  if (raw !== '') {
+    /*
+     * 相对路径相对 DSH 主目录 —— 而不是进程 cwd。
+     * cwd 因启动方式而变，靠它拼路径会让「同一个配置在不同启动下指向不同文件」。
+     */
+    return isAbsolutePath(raw) ? resolve(raw) : join(dshHome(), raw)
+  }
+
+  return join(dshHome(), DEFAULT_DATA_DIR_NAME)
+}
+
+/** 跨平台的绝对路径判断（Windows 盘符 + UNC + POSIX 根）。 */
+function isAbsolutePath(value) {
+  return /^[A-Za-z]:[\\/]/u.test(value) || value.startsWith('\\\\') || value.startsWith('/')
+}
+
+/**
+ * 当前生效的数据目录。
+ *
+ * 由插件入口在 `apply` 里调 {@link useDataDir} 设一次，之后所有读写都用它。
+ *
+ * 为什么用模块级状态而不是给每个函数加参数：`readConfig` / `writeConfig` 在路由
+ * 层有近二十个调用点，逐个传参既啰嗦又容易漏一个——漏掉的那个会对**另一个目录**
+ * 读写，症状是「某个按钮存的东西消失了」。目录在插件生命周期内是固定的（改它要
+ * 重启插件），所以在这里存一份是安全的。
+ */
+let activeDataDir
+
+/**
+ * 设定本插件使用的数据目录。由 `apply` 调一次。
+ * @param configured 插件配置里的 `dataDir`（空表示用默认）
+ * @returns 解析后的绝对目录
+ */
+export function useDataDir(configured) {
+  activeDataDir = resolveDataDir(configured)
+  return activeDataDir
+}
+
+/** 读出当前生效的目录（未设置时按默认解析）。 */
+export function activeDataDirPath() {
+  return activeDataDir ?? resolveDataDir(undefined)
+}
+
 /** 数据文件路径。 */
 export function configPath() {
-  const home = process.env.DSH_HOME
-  const base = typeof home === 'string' && home.trim() !== '' ? home.trim() : join(homedir(), '.dsh')
-  return join(base, 'workbuddy-gateway', 'keys.json')
+  return join(activeDataDirPath(), 'keys.json')
+}
+
+/**
+ * 路径是否是「跟随默认」而不是用户显式设的。
+ * 设置页据此显示「默认（DEFAULT_DATA_DIR_NAME）」而不是把一长串路径当用户输入。
+ */
+export function isDefaultDataDir(configured) {
+  return typeof configured !== 'string' || configured.trim() === ''
 }
 
 /** 空配置。 */
