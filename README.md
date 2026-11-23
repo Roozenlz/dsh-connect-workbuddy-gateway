@@ -63,7 +63,9 @@ git clone https://github.com/Roozenlz/dsh-workbuddy-gateway
 dsh-workbuddy-gateway
 ```
 
-> 需要该包已发布到 npm。未发布时这一步会报 `not-found`，请用 A 或 B。
+> ⚠️ **当前尚未在 npm 上可用。** 本包曾以 `2.1.0` 发布，为把首次公开版本对齐到
+> `1.0.0` 而整包删除；npm 对整包删除有 24 小时重发冷却，之后会以 `1.0.0` 发布。
+> 在此之前请用 A 或 B。
 
 **D. 从插件市场**
 
@@ -339,6 +341,75 @@ Responses 流的规范校验（`sequence_number`、part 一致性、terminal 的
 
 `tests/responses-spec.mjs` 是独立写的 OpenAI Responses 流校验器，对着故意做坏的流
 验证过它确实会报错。
+
+---
+
+## 发布
+
+本包**零依赖、零构建**：源码就是发布物，不需要打包步骤。发布分两种方式。
+
+### 方式一：GitHub Actions 自动发布（推荐，无 token）
+
+推一个与 `package.json` 版本号一致的 tag：
+
+```bash
+# package.json 里是 1.0.0 就推 v1.0.0
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+`.github/workflows/publish.yml` 会校验 tag 与版本一致、跑一遍自测，然后发布。
+
+**凭据走 OIDC，仓库里不存任何 npm token。** 这需要先在 npm 上配对一次：
+
+> `https://www.npmjs.com/package/<包名>/access` → Trusted Publisher → GitHub Actions
+>
+> | 字段 | 值 |
+> |---|---|
+> | Organization | `Roozenlz` |
+> | Repository | `dsh-workbuddy-gateway` |
+> | Workflow name | `publish.yml` |
+> | Environment | 留空 |
+>
+> 勾选 `npm publish` 权限。配好后状态是 **Pending validation**，需要发布一次才算生效。
+
+为什么不用 token：npm 已宣布「绕过 2FA 的 token」将在 2027 年 1 月起不能用于发布，
+而且长期 token 一旦泄漏就等于交出发布权。
+
+### 方式二：本地手动发布
+
+```bash
+npm publish --registry=https://registry.npmjs.org/ --access public
+```
+
+需要先 `npm login`，或在本机准备好带 publish 权限的凭据。`package.json` 里的
+`publishConfig.registry` 已指向官方源——本机默认源常被设成镜像（如 npmmirror），
+镜像只读、不接受 publish。
+
+### 发布前检查
+
+```bash
+node tests/harness.mjs      # 全绿再发
+npm pack --dry-run          # 看清会打包哪些文件
+```
+
+### npm 的两条硬限制
+
+这两条都实际踩过，发布流程设计时绕不开：
+
+1. **新包首次发布要过审核。** npm 会先放一个 `0.0.0-stage` 占位版本，真实版本
+   「awaiting a staged release」。审核通过前 `npm i <包名>` 装到的是占位符。
+2. **整包删除后有 24 小时冷却。** 删掉整个包之后，同名包 24 小时内不能重新发布：
+
+   ```
+   403 dsh-workbuddy-gateway cannot be republished until 24 hours have passed
+   ```
+
+   只删单个版本时，该版本号也会在 24 小时内不可重用。
+
+另外，**绕过 2FA 的 granular token 只能发布**，不能 unpublish、改包权限或配置
+trusted publisher——这类「账号变更」操作必须在 npm 网页上完成并验证安全密钥。
+
 
 ## License
 
