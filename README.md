@@ -8,9 +8,9 @@
 WorkBuddy 模型（国内版 + 国际版）开放成一个本机可调用的 HTTP API，四种最常用的协议
 共用一个 `base_url`。
 
-**路由策略挂在 API key 上，不写在模型名里。** 每把 key 自带一套策略（跟随 DSH 默认
-模型 / 跟随活跃会话 / 固定模型 / 固定账号 / 目录第一个），全部在
-**设置 → WorkBuddy 模型网关**里点选管理。
+**每把 key 勾选自己要对外提供的模型。** 用户直接勾哪些 `(账号, 模型)` 组合，
+`/v1/models` 就返回哪些；重名的模型名会自动挂账号后缀，推理档位由客户端自己选。
+全部在 **设置 → WorkBuddy 模型网关** 里管理。
 
 ---
 
@@ -43,7 +43,7 @@ WorkBuddy 模型（国内版 + 国际版）开放成一个本机可调用的 HTT
 | 上游渠道指纹、`11128` 救助、错误分类 | `dsh-connect-workbuddy` |
 | 模型目录与积分倍率、每日签到 | `dsh-connect-workbuddy` |
 | 四种对外协议的请求/响应转换 | **本插件** |
-| 按 API key 的路由策略与多 key 管理 | **本插件** |
+| 按 API key 的模型勾选与多 key 管理 | **本插件** |
 | 设置界面、key 生成与轮换 | **本插件** |
 
 没有 `dsh-connect-workbuddy` 时本插件装得上但**发不出请求**：它会明确报
@@ -63,12 +63,15 @@ dsh plugin install dsh-workbuddy-gateway
 **Plugins → Add plugin** 里选那个目录。
 
 两者在 DSH 设置里各占一栏：`dsh-connect-workbuddy` 管账号与模型目录，
-**WorkBuddy 模型网关**管对外的 key 与策略。
+**WorkBuddy 模型网关**管对外的 key 与勾选。
 
 ### 友链
 
 - **dsh-connect-workbuddy** — <https://github.com/dingminhua/dsh-connect-workbuddy>
   WorkBuddy 接入 DeepSeek Harness 的完整方案。本插件全部上游能力都来自它。
+- **cc-switch** — <https://github.com/farion1231/cc-switch>
+  本插件的模型列表字段（菜单显示名 / 实际请求模型 / 上下文窗口 / 思考等级）与它
+  的「模型映射」表对齐，因此可以直接在 cc-switch 里用它的「获取模型列表」。
 - **DeepSeek Harness** — <https://github.com/deepseek-ai/deepseek-harness>
   本插件运行其上的宿主。
 - 上游协议的官方文档：[OpenAI Chat Completions](https://platform.openai.com/docs/api-reference/chat) ·
@@ -81,11 +84,11 @@ dsh plugin install dsh-workbuddy-gateway
 ## 安装后的三步
 
 1. 打开 **设置 → WorkBuddy 模型网关**。
-2. 页面顶部就是 **Base URL**，例如 `http://127.0.0.1:9055/workbuddy-gateway`。
-3. 在 **API keys** 里选一把 key（首次启动自动建了一把 `default`），点 **显示** 拿到
-   它的 secret，填进你的客户端。
+2. 复制你要用的那个协议的 **Base URL**（页面顶部按协议分行给出成品地址）。
+3. 在 **API keys** 里选一把 key（首次启动自动建一把 `default`，并已勾上全部模型），
+   点 **显示明文** 拿到 secret，填进客户端。
 
-请求体里的 `model` 可以完全不写 —— 用这把 key 的策略。
+请求体里的 `model` 要写 `/v1/models` 返回的 `id`（清单只有一项时可以省略）。
 
 ---
 
@@ -98,50 +101,70 @@ dsh plugin install dsh-workbuddy-gateway
 | Anthropic Messages | `POST {base}/v1/messages` | SSE（`message_start` … `message_stop`） |
 | Gemini | `POST {base}/v1beta/models/{model}:generateContent` / `:streamGenerateContent` | SSE，每事件一整条响应 |
 
-Gemini 的模型名可以写 `-`（如 `models/-:generateContent`）表示「用 key 的策略」。
+Gemini 的模型名写 `-`（如 `models/-:generateContent`）表示「用清单里唯一那一项」。
 
 配套只读路由：
 
-- `GET {base}/v1/models` —— OpenAI 形状的模型目录
-- `GET {base}/v1beta/models` —— Gemini 形状的模型目录
+- `GET {base}/v1/models` —— 这把 key 勾选的模型（OpenAI 形状）
+- `GET {base}/v1beta/models` —— 同上（Gemini 形状）
 - `GET {base}/v1/accounts` —— 本机各区域的 WorkBuddy 账号（只有 id 与名称）
-- `GET {base}/healthz` —— 存活信息与**当前这把 key 的策略**
+- `GET {base}/healthz` —— 存活信息与**这把 key 当前对外提供的模型名**
+
+把 `anthropic-version` 请求头带上时，`/v1/models` 会改回 Anthropic 的形状
+（`{data:[{type,id,display_name}]}`），因为 Anthropic SDK 读的是那一种。
 
 ---
 
-## API key 与路由策略
+## API key 与模型勾选
 
-每把 key 是独立的：独立的 secret、独立的策略、独立的启停。因此「给 Codex 一把固定
-用 `glm-5.3` 的 key，给另一个脚本一把固定用国际版账号的 key」是可以的，两者互不影响，
-也不需要在模型名里写任何前缀。
+**没有「策略模式」。** 每把 key 做的就是一份勾选清单：哪些 `(账号, 模型)` 组合要对
+外提供。`/v1/models` 原样返回这份清单，请求里的 `model` 按名字查表得到「用哪个账号
+跑哪个模型」。
 
-### 六种策略
+选哪个模型是**调用方**的事，插件只负责照单发货。
 
-| 策略 | 含义 |
-|---|---|
-| `dsh` | 跟随 **DSH 新会话的默认模型**（`agentDefaultModel`） |
-| `session` | 跟随 **最近活跃会话**正在用的模型 |
-| `current` | 先看活跃会话，再看 DSH 默认 —— 「此刻在用的那个」 |
-| `named` | **固定某个 provider + 模型**，这把 key 专属 |
-| `account` | **固定某个账号**（可再固定模型），走直连通道 |
-| `first` | 目录里第一个模型 |
+### 勾选哪些
 
-四种「跟随」型策略在读不到来源时（例如没有活跃会话）会退到 DSH 默认选择，再退到
-目录第一个 —— 不会因为「此刻没有会话」就报错。
+在 **设置 → WorkBuddy 模型网关** 里点开某把 key 的「对外提供的模型」，按账号分组勾选。
+每组第一行是「默认账号」——它走宿主通道，插件自己的账号选择与账号池都生效；其余
+各行是具体账号，适合「这个模型只用那个号的额度」这类需求。
 
-`named` / `account` 没选模型时**能保存但不可用**，请求会返回 `409 model_not_configured`
-并说明去哪儿配。这是刻意的：让它存得下去，用户才不必一次填完。
+### 重名怎么办
 
-### 请求显式写 model 时
+两个账号下都有 `deepseek-v4.1-flash` 时，两行同名客户端无法区分。所以重名的项会在
+名字末尾挂账号后缀：
 
-请求体里的 `model` **优先于** key 的策略。这是客户端 SDK 的硬要求（它们总会带一个
-model 字段），无法禁止，所以设计上承认它：写 `model` ＝ 「这次就用这个」，不写 ＝
-「用这把 key 的策略」。策略负责的是**默认值**，不是禁止覆盖。
+```
+deepseek-v4.1-flash            ← 默认账号那条（总是保留裸名）
+deepseek-v4.1-flash@pony       ← 账号昵称是纯 ASCII，直接用
+deepseek-v4.1-flash@#9         ← 昵称含中文/emoji，退化成序号
+```
 
-### 推理强度
+**后缀必须是 ASCII。** 本机就有一个昵称是 `ฅ՞•ﻌ•՞ฅ` 的账号：把这种字符放进模型名，
+它会被塞进请求体、配置文件、甚至 shell 命令行，总有一环会炸。所以纯
+`[A-Za-z0-9._-]` 且不超过 24 字符的昵称才用，其余一律用序号。
 
-每把 key 可以单独钉一个 `reasoningEffort`（`off` / `minimal` / `low` / `medium` /
-`high` / `xhigh` / `max`），留空表示用模型自己的默认档。
+名字是稳定的：同样的勾选永远得到同样的名字，客户端缓存不会因刷新而失效。
+
+### 推理强度由客户端决定
+
+插件**不替客户端选档位**。`/v1/models` 只声明「这个模型支持哪几档」：
+
+```json
+{ "id": "deepseek-v4.1-flash", "reasoning": true,
+  "reasoning_efforts": ["low", "high", "max"] }
+```
+
+客户端发来的 `reasoning_effort` 原样透传给上游。上游没声明档位时给空数组，
+客户端就不会显示一个假的选择器。
+
+### 请求里的 model
+
+必填（清单多于一项时）。它必须是 `/v1/models` 返回的 `id` 之一 —— 也就是可能带
+`@pony` 这类后缀的那个名字。插件也会宽松地接受裸模型 id，但仅当清单里恰好只有一项
+用这个 id（否则无法判断用户指的是哪个账号）。
+
+写了清单外的名字会返回 404，并在错误信息里列出这把 key 能选什么。
 
 ### 鉴权
 
@@ -164,11 +187,12 @@ x-goog-api-key: wbg-...
 
 **设置 → WorkBuddy 模型网关**：
 
-- 看 Base URL 与配置文件路径（都能一键复制）
+- 看四种协议各自的 **Base URL** 与配置文件路径（都能一键复制）
 - **新建 key** —— 生成后弹一次明文，之后列表里只显示掩码
-- **显示 / 重置** —— 显示明文；重置换新 secret 并让旧的立即失效
+- **显示明文 / 重置** —— 显示明文；重置换新 secret 并让旧的立即失效
 - **删除** —— 二次确认
-- 每把 key：名称、启停、策略、区域、模型、账号、推理强度
+- 每把 key：名称、启停，以及**按账号分组的模型勾选**（带搜索、全选、清空）
+- 每把 key 上直接列出「客户端会看到的名字」，重名后缀一目了然，不用自己推算
 - 页面底部给一条 `curl` 示例
 
 配置文件在：
@@ -177,7 +201,7 @@ x-goog-api-key: wbg-...
 $DSH_HOME/workbuddy-gateway/keys.json      # 权限 600
 ```
 
-它只存本插件自己的 key 与策略，**不含任何 WorkBuddy 凭据**。
+它只存本插件自己的 key 与勾选清单，**不含任何 WorkBuddy 凭据**。
 
 ---
 
@@ -185,11 +209,11 @@ $DSH_HOME/workbuddy-gateway/keys.json      # 权限 600
 
 ### 两条通道
 
-**宿主通道（默认）**：请求翻译成 DSH 的 `GenerateOptions`，交给
+**宿主通道（勾选里账号为空的那条）**：请求翻译成 DSH 的 `GenerateOptions`，交给
 `dsh-connect-workbuddy` 注册的 adapter。换号、渠道指纹救助、context rescue、积分统计
 全部免费继承，WorkBuddy 凭据不出进程。
 
-**直连通道（`account` 策略）**：复用插件导出的 `WorkBuddyCredentialStore` /
+**直连通道（勾选了具体账号的那条）**：复用插件导出的 `WorkBuddyCredentialStore` /
 `WorkBuddyUpstreamClient` / `createWorkBuddyShim` 组装一套只属于网关的 loopback shim，
 再点名账号。上游协议一行没重写，所以行为与插件本体一致；只有「谁付这次请求」由网关
 决定。
@@ -211,13 +235,16 @@ $DSH_HOME/workbuddy-gateway/keys.json      # 权限 600
 
 - `count_tokens` 返回 `0`：WorkBuddy 上游没有该端点，本地估算没有意义。
 - 模型名**不承载配置**。曾有一版把区域与账号编码进模型名（`cn/account=…/model`），
-  已被本版移除：那是「用字符串当配置文件」，无法在界面上管理，也无法按 key 区分。
+  已被移除；现在名字里唯一可能出现的附加信息是**重名后缀**（`@pony`），它纯粹是给
+  客户端区分用的显示名，解析时会被剥掉。
 - 图片只接受 data URL / base64。网关在 loopback 上，代抓远端 URL 等于开一个无鉴权的
   SSRF 出口。
 - Responses 的 `previous_response_id` / `store` 未实现：网关无状态，历史由调用方每次
   带全。
 - Gemini 流式的思考增量与正文合并输出：Gemini 的流式思考协议不是一个事件一个
   `thought` 标记。
+- 「默认账号」那条（勾选里账号为空）的模型走宿主通道，账号由插件的选择/账号池决定；
+  想在网关这一侧固定账号，就要勾选具体账号那一条。
 
 ---
 
@@ -228,8 +255,10 @@ $DSH_HOME/workbuddy-gateway/keys.json      # 权限 600
 node tests/harness.mjs
 ```
 
-覆盖：首次建 key、四位置鉴权、六种策略、两把 key 各自路由、启停、轮换、删除、
-四种协议的流式与非流式、工具调用三方言、图片输入、上游失败传播。
+覆盖：首次建 key 与惰性补选、四位置鉴权、模型勾选与清单投影、重名后缀（英文昵称 /
+非 ASCII 序号）、按名字路由、推理档透传、Responses 的 usage 形状、两把 key 各自
+清单、启停、轮换、删除、四种协议的流式与非流式、工具调用三方言、图片输入、上游
+失败传播。
 
 ## License
 
