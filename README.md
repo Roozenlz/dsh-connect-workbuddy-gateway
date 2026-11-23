@@ -1,5 +1,9 @@
 # dsh-workbuddy-gateway
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![DeepSeek Harness plugin](https://img.shields.io/badge/DeepSeek%20Harness-plugin-2f6df6)](https://github.com/deepseek-ai/deepseek-harness)
+[![Requires dsh-connect-workbuddy](https://img.shields.io/badge/requires-dsh--connect--workbuddy-25c6a4)](https://github.com/dingminhua/dsh-connect-workbuddy)
+
 把 [dsh-connect-workbuddy](https://github.com/dingminhua/dsh-connect-workbuddy) 提供的
 WorkBuddy 模型（国内版 + 国际版）开放成一个本机可调用的 HTTP API，四种最常用的协议
 共用一个 `base_url`。
@@ -48,12 +52,15 @@ WorkBuddy 模型（国内版 + 国际版）开放成一个本机可调用的 HTT
 ### 你需要的两个插件
 
 ```bash
-# 1. 先装模型来源（必需）
+# 1. 先装模型来源（必需）—— 本插件全部上游能力都来自它
 dsh plugin install dsh-connect-workbuddy
 
 # 2. 再装网关门面（本插件）
 dsh plugin install dsh-workbuddy-gateway
 ```
+
+或者从本仓库安装本地目录：把仓库 `git clone` 到任意位置，然后在 DSH 的
+**Plugins → Add plugin** 里选那个目录。
 
 两者在 DSH 设置里各占一栏：`dsh-connect-workbuddy` 管账号与模型目录，
 **WorkBuddy 模型网关**管对外的 key 与策略。
