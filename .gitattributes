@@ -1,0 +1,10 @@
+# 统一用 LF 存储，避免 Windows 上 CRLF 造成的整文件假差异。
+* text=auto eol=lf
+
+# 这些是二进制，不能被当文本转换。
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.ico binary
+*.gif binary
