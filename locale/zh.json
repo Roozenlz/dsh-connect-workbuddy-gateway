@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "WorkBuddy 模型网关",
+    "description": "把 dsh-connect-workbuddy 的 WorkBuddy 模型开放成本机 API：OpenAI Chat、OpenAI Responses、Anthropic Messages、Gemini 四协议共用一个 base URL。每把 API key 自带路由策略（跟随 DSH 默认、跟随活跃会话、固定模型、固定账号），全部在设置页里管理。"
+  }
+}

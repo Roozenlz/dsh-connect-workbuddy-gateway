@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "WorkBuddy Gateway",
+    "description": "Exposes the WorkBuddy models from dsh-connect-workbuddy as a local API: OpenAI Chat, OpenAI Responses, Anthropic Messages and Gemini on one base URL. Each API key carries its own routing policy (DSH default, active session, fixed model, fixed account), managed in the settings page."
+  }
+}

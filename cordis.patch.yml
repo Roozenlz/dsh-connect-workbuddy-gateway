@@ -1,0 +1,4 @@
+- insert:
+    - id: workbuddy-gateway
+      name: dsh-workbuddy-gateway
+      config: {}
