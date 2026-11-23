@@ -56,6 +56,8 @@ window.__ModuleLoader__.load({
         unavailableHint: '上游判定这些账号暂时不能用，已从可勾选列表移除；恢复后会自动回来。',
         healthFresh: '账号状态读取于',
         healthStale: '尚未读到上游账号状态',
+        brokenSelections: '其中 {n} 个模型所用的账号当前不可用，请求会失败；账号恢复后会自动生效。',
+        autoRefresh: '每 30 秒自动刷新',
         selected: '已选',
         noneSelected: '还没有勾选任何模型，这把 key 暂时不能用。',
         willExpose: '客户端会看到',
@@ -111,6 +113,8 @@ window.__ModuleLoader__.load({
         unavailableHint: 'The upstream marks these accounts unusable, so they are not offered for ticking. They return automatically once healthy.',
         healthFresh: 'Account state read at',
         healthStale: 'No upstream account state yet',
+        brokenSelections: '{n} of these models use an account that is unavailable right now, so requests will fail until it recovers.',
+        autoRefresh: 'Refreshes every 30 s',
         selected: 'selected',
         noneSelected: 'No models ticked yet, so this key cannot be used.',
         willExpose: 'The client will see',
@@ -553,6 +557,18 @@ window.__ModuleLoader__.load({
       const catalog = entry.catalog ?? []
       const count = (entry.selections ?? []).length
 
+      /*
+       * 这把 key 里有没有勾着「现在被上游判为不可用」的账号。
+       *
+       * 不主动删用户的勾选（他可能只是暂时不可用，恢复后该自动回来），但要告诉
+       * 他：这些模型现在请求会失败，原因在上游而不是网关。
+       */
+      const brokenSelections = (entry.selections ?? []).filter((row) => {
+        if ((row.accountId ?? '') === '') return false
+        const account = (state?.accounts ?? []).find((item) => item.id === row.accountId)
+        return account !== undefined && account.available === false
+      })
+
       return h('div', { className: 'wbg-item' },
         h('div', { className: 'wbg-item-head' },
           h('span', { className: `wbg-dot${enabled ? ' wbg-dot-on' : ''}`, 'aria-hidden': true }),
@@ -577,6 +593,10 @@ window.__ModuleLoader__.load({
         ),
 
         count === 0 ? h('p', { className: 'wbg-warn' }, t.noneSelected) : null,
+
+        /* 勾着不可用账号的模型：不替他删，但要说明「现在调会失败」。 */
+        brokenSelections.length === 0 ? null : h('p', { className: 'wbg-warn' },
+          t.brokenSelections.replace('{n}', String(brokenSelections.length))),
 
         /* 用户实际会看到的名字（含重名后缀），让他核对而不是自己推算。 */
         count === 0 ? null : h('div', null,
@@ -654,7 +674,23 @@ window.__ModuleLoader__.load({
         }
       }, [])
 
-      useEffect(() => { void reload() }, [reload])
+      /*
+       * 打开时读一次，之后**定时重读**。
+       *
+       * 为什么必须定时：账号的可用性来自上游的池状态文件，冷却到期后那个账号就
+       * 该回到可勾选列表。只在挂载时读一次的话，用户开着设置页也要手动刷新才看
+       * 得到它回来 —— 而「恢复后自动同步」正是用户的明确要求。
+       *
+       * 30 秒是刻意选的：比上游自己的轮询（默认 5 分钟）密，用户几乎立刻能看到
+       * 变化；又不会密到让一个只在看设置页的人持续产生请求（这个接口只读本地
+       * 文件，不打上游）。
+       */
+      const REFRESH_MS = 30000
+      useEffect(() => {
+        void reload()
+        const timer = setInterval(() => { void reload() }, REFRESH_MS)
+        return () => clearInterval(timer)
+      }, [reload])
 
       const addKey = useCallback(async () => {
         setBusy(true)

@@ -792,6 +792,54 @@ console.log('\n== 不可用账号必须从可勾选列表移除 ==')
   check('报出状态时间', typeof state.body.health?.stateFileMtime === 'number' && state.body.health.stateFileMtime > 0, JSON.stringify(state.body.health))
 }
 
+console.log('\n== 账号恢复后必须自动回到可勾选列表 ==')
+{
+  /*
+   * 用户问：「账号恢复了是否能同步过来」。
+   *
+   * 恢复由两件事共同保证：
+   *   1. `poolHealth` 把「冷却已过」判为可用（时间到了就放回）
+   *   2. `/state` 每次被读都重算，设置页每 30 秒读一次
+   *
+   * 这里验证第 1 条在**同一个账号**上从不可用翻回可用 —— 关键是不能缓存住。
+   */
+  const { writeFileSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const poolFile = join(process.env.DSH_HOME, '.workbuddy-pool.cn.json')
+  const now = Date.now()
+
+  /* 先写成「冷却中」。 */
+  writeFileSync(poolFile, JSON.stringify({
+    version: 1,
+    probes: { acct_pony: { outcome: 'rate-limited', atMs: now - 60000, retryAtMs: now + 3600000, message: '限流' } },
+  }), 'utf8')
+  const cooling = await adminGet('/state')
+  check('冷却中不可用', cooling.body.accounts.find((a) => a.id === 'acct_pony')?.available === false, JSON.stringify(cooling.body.accounts.find((a) => a.id === 'acct_pony')))
+
+  /* 改成「冷却已过」—— 同一个文件、同一个账号，只有时间变了。 */
+  writeFileSync(poolFile, JSON.stringify({
+    version: 1,
+    probes: { acct_pony: { outcome: 'rate-limited', atMs: now - 7200000, retryAtMs: now - 1000, message: '旧限流' } },
+  }), 'utf8')
+  const recovered = await adminGet('/state')
+  const account = recovered.body.accounts.find((a) => a.id === 'acct_pony')
+  check('冷却到期后恢复可用', account?.available === true, JSON.stringify(account))
+  check('恢复后回到候选', (recovered.body.available ?? []).some((row) => row.accountId === 'acct_pony'), 'not in candidates')
+  check('不再出现在不可用列表', !(recovered.body.unavailableAccounts ?? []).some((a) => a.id === 'acct_pony'), JSON.stringify(recovered.body.unavailableAccounts))
+
+  /*
+   * 上游再次写回失败 → 立刻又变不可用。这是「跟上游保持同步」的另一半：
+   * 恢复不是一次性的，随时可能因为新一轮限流再变回去。
+   */
+  writeFileSync(poolFile, JSON.stringify({
+    version: 1,
+    probes: { acct_pony: { outcome: 'rate-limited', atMs: now, retryAtMs: now + 1800000, message: '又限流了' } },
+  }), 'utf8')
+  const again = await adminGet('/state')
+  check('再限流又变不可用', again.body.accounts.find((a) => a.id === 'acct_pony')?.available === false, JSON.stringify(again.body.accounts.find((a) => a.id === 'acct_pony')))
+  check('又从候选移除', !(again.body.available ?? []).some((row) => row.accountId === 'acct_pony'), 'still in candidates')
+}
+
 console.log('\n== OpenAI Chat 流式 + 工具 ==')
 {
   await adminPost('/keys/update', {

@@ -1,9 +1,7 @@
 {
   "name": "dsh-workbuddy-gateway",
-  "version": "2.0.0",
-  "private": true,
-  "type": "module",
-  "description": "把 dsh-connect-workbuddy 提供的 WorkBuddy 模型开放成本机可调用的 API：OpenAI Chat / OpenAI Responses / Anthropic Messages / Gemini 四种协议共用一个 base URL，路由策略挂在 API key 上并在设置页里管理。",
+  "version": "2.1.0",
+  "description": "把 dsh-connect-workbuddy 的 WorkBuddy 模型开放成本机 API：OpenAI Chat / Responses、Anthropic Messages、Gemini 四协议共用一个 base URL，模型按 API key 逐个勾选。",
   "keywords": [
     "dsh-plugin",
     "deepseek-harness",
@@ -11,13 +9,34 @@
     "gateway",
     "openai-compatible",
     "anthropic",
-    "gemini"
+    "gemini",
+    "llm-gateway",
+    "codex",
+    "claude-code"
   ],
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "Roozenlz",
+    "url": "https://github.com/Roozenlz"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Roozenlz/dsh-workbuddy-gateway.git"
+  },
+  "homepage": "https://github.com/Roozenlz/dsh-workbuddy-gateway#readme",
+  "bugs": {
+    "url": "https://github.com/Roozenlz/dsh-workbuddy-gateway/issues"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
     "./locale/*.json": "./locale/*.json",
-    "./icon": "./icon.svg"
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
   },
   "files": [
     "index.js",
@@ -27,7 +46,8 @@
     "locale",
     "docs",
     "icon.svg",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "dsh": {
     "bundle": {
