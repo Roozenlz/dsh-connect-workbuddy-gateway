@@ -1,6 +1,6 @@
 {
   "name": "dsh-connect-workbuddy-gateway",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "把 dsh-connect-workbuddy 的 WorkBuddy 模型开放成本机 API：OpenAI Chat / Responses、Anthropic Messages、Gemini 四协议共用一个 base URL，模型按 API key 逐个勾选。",
   "keywords": [
     "dsh-plugin",
