@@ -124,7 +124,7 @@ function flattenToolResult(content) {
 export async function handleMessages(req, res, env) {
   const body = await readJson(req)
   const request = parseMessagesRequest(body)
-  const target = await resolve(env.ctx, env.config, env.providers(), env.key, request.model)
+  const target = resolve(env.providers(), env.key, request.model, env.config)
   const modelName = request.model === '' ? target.model : request.model
   const signal = abortSignalOf(res, req)
   const id = `msg_${randomId()}`

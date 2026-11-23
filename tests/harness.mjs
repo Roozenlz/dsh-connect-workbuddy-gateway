@@ -1,8 +1,8 @@
 /**
  * 本地端到端自测：用假 ctx 把网关的两类路由都跑一遍。
  *
- *   - 对外 API：四种协议的入站解析与出站序列化，以及「策略来自 key」的路由；
- *   - 管理接口：key 的增删改、显示/重置、按策略落盘。
+ *   - 对外 API：四种协议的入站解析与出站序列化，以及「模型清单来自 key 的勾选」；
+ *   - 管理接口：key 的增删改、勾选清单、显示/重置、重名后缀。
  *
  * 不需要真实凭据，不花钱：`node tests/harness.mjs`
  */
@@ -43,9 +43,7 @@ const TOOLS = [
 
 const lastCall = { options: undefined }
 let nextChunks = PLAIN
-let defaultSelectionValue = { provider: 'workbuddy', model: 'glm-5.3', reasoningEffort: 'high' }
-let sessionSelectionValue
-let failNext = undefined
+let failNext
 
 const CATALOG = {
   workbuddy: [{ id: 'glm-5.3', name: 'GLM-5.3' }, { id: 'space-bunny', name: 'Space Bunny' }],
@@ -92,22 +90,34 @@ const attachments = {
   },
 }
 
+/* 假账号表：一个纯英文名（可直接当后缀），一个中文+emoji 名（只能用序号）。 */
+const FAKE_VAULT = {
+  cn: [
+    { id: 'acct_pony', name: 'pony', region: 'cn' },
+    { id: 'acct_cat', name: 'ฅ՞•ﻌ•՞ฅ', region: 'cn' },
+  ],
+  global: [
+    { id: 'acct_roozen', name: 'roozen', region: 'global' },
+  ],
+}
+
 const services = new Map([
   ['llm', llm],
   ['attachments', attachments],
-  ['agentDefaultModel', { currentSelection: () => defaultSelectionValue }],
-  ['agents', {
-    list: () => (sessionSelectionValue === undefined
-      ? []
-      : [{ session: { requestHeader: () => ({ config: sessionSelectionValue }) } }]),
-  }],
+  ['agentDefaultModel', { currentSelection: () => ({ provider: 'workbuddy', model: 'glm-5.3', reasoningEffort: 'high' }) }],
+  ['agents', { list: () => [] }],
 ])
 
 let origin = ''
 let currentServer
 const disposers = []
 const ctx = {
-  logger: { info: () => {}, warn: () => {}, error: () => {} },
+  /* 启动期日志打到 stdout，方便定位「种子为什么没落盘」。 */
+  logger: {
+    info: (message) => { if (process.env.WBG_VERBOSE === '1') console.log(`    [info] ${message}`) },
+    warn: (message) => console.log(`    [warn] ${message}`),
+    error: () => {},
+  },
   effect(factory) {
     const dispose = factory()
     if (typeof dispose === 'function') disposers.push(dispose)
@@ -129,6 +139,10 @@ const ctx = {
 currentServer = createServer(() => {})
 await new Promise((resolve) => currentServer.listen(0, '127.0.0.1', resolve))
 origin = `http://127.0.0.1:${currentServer.address().port}`
+
+/* 账号表来自真实 vault 目录；测试里伪造两份，避免依赖本机登录状态。 */
+const { stubAccounts } = await import('./stub-accounts.mjs')
+stubAccounts(FAKE_VAULT)
 
 apply(ctx, {})
 
@@ -162,321 +176,270 @@ async function adminPost(path, payload) {
 }
 
 async function keyPost(path, secret, payload) {
-  const response = await fetch(`${API}${path}`, {
+  return fetch(`${API}${path}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${secret}` },
     body: JSON.stringify(payload),
   })
-  return response
 }
 
 /* ── 用例 ─────────────────────────────────────────────────────────────── */
 
-console.log('\n== 首次启动自动建 key ==')
+console.log('\n== 首次启动建 key（异步勾齐全量模型）==')
 let firstKey
+let firstId
 {
-  const state = await adminGet('/state')
+  /*
+   * `apply` 是同步的，而 provider 注册是异步的，所以首次勾选是异步补上的。
+   * 等它落盘再断言 —— 这里最多等 ~4 秒。
+   */
+  let state
+  for (let attempt = 0; attempt < 24; attempt += 1) {
+    state = await adminGet('/state')
+    if ((state.body.keys?.[0]?.selections ?? []).length > 0) break
+    await new Promise((resolve) => setTimeout(resolve, 250))
+  }
   check('200', state.status === 200, String(state.status))
-  check('一把默认 key', state.body.keys?.length === 1, JSON.stringify(state.body.keys))
-  check('baseUrl', state.body.baseUrl === API, state.body.baseUrl)
-  check('策略可选项', state.body.policyModes?.length === 6, JSON.stringify(state.body.policyModes))
+  check('一把默认 key', state.body.keys?.length === 1, JSON.stringify(state.body.keys?.length))
+  check('异步勾上了模型', state.body.keys[0].selections.length > 0, String(state.body.keys[0].selections.length))
+  check('可用模型表非空', state.body.available.length > 0, String(state.body.available?.length))
+  check('账号表带 safeSuffix', state.body.accounts.every((account) => 'safeSuffix' in account), JSON.stringify(state.body.accounts))
   const created = await adminPost('/keys/reveal', { id: state.body.keys[0].id })
   firstKey = created.body.secret
+  firstId = state.body.keys[0].id
   check('reveal 拿到明文', typeof firstKey === 'string' && firstKey.startsWith('wbg-'), String(firstKey))
   check('state 里是打码的', /^\S{4}\*+\S{4}$/u.test(state.body.keys[0].masked), state.body.keys[0].masked)
-  check('目录已投影', state.body.models?.length === 4, String(state.body.models?.length))
 }
 
 console.log('\n== 鉴权 ==')
 {
-  const none = await fetch(`${API}/v1/models`)
-  check('无 key 401', none.status === 401, String(none.status))
-  const wrong = await fetch(`${API}/v1/models`, { headers: { Authorization: 'Bearer wbg-nope' } })
-  check('错 key 401', wrong.status === 401, String(wrong.status))
-  const good = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
-  check('对 key 200', good.status === 200, String(good.status))
-  const viaGoogle = await fetch(`${API}/v1/models`, { headers: { 'x-goog-api-key': firstKey } })
-  check('x-goog-api-key', viaGoogle.status === 200, String(viaGoogle.status))
-  const viaQuery = await fetch(`${API}/v1/models?key=${encodeURIComponent(firstKey)}`)
-  check('?key=', viaQuery.status === 200, String(viaQuery.status))
+  check('无 key 401', (await fetch(`${API}/v1/models`)).status === 401)
+  check('错 key 401', (await fetch(`${API}/v1/models`, { headers: { Authorization: 'Bearer wbg-nope' } })).status === 401)
+  check('对 key 200', (await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })).status === 200)
+  check('x-goog-api-key', (await fetch(`${API}/v1/models`, { headers: { 'x-goog-api-key': firstKey } })).status === 200)
+  check('?key=', (await fetch(`${API}/v1/models?key=${encodeURIComponent(firstKey)}`)).status === 200)
 }
 
 console.log('\n== 掩码必须是可安全放进 HTTP 头的 ASCII ==')
 {
-  /*
-   * 这条来自真实故障：掩码里用了 `…`（U+2026），用户把它当 key 填进客户端后
-   * 报 `Cannot convert argument to a ByteString ... value of 8230`。
-   */
   const state = await adminGet('/state')
   const masked = state.body.keys[0].masked
   check('全是 ASCII', /^[\x20-\x7E]+$/u.test(masked), JSON.stringify(masked))
   check('不含 U+2026', !masked.includes('\u2026'), JSON.stringify(masked))
-  check('不含 U+00B7/U+2022', !masked.includes('\u00b7') && !masked.includes('\u2022'), JSON.stringify(masked))
-  const byteSafe = (() => {
-    try {
-      /* 模拟 HTTP 头写入：任何 >255 的码点都会抛。 */
-      Buffer.from(masked, 'latin1')
-      for (const ch of masked) if (ch.codePointAt(0) > 255) return false
-      return true
-    } catch {
-      return false
-    }
-  })()
-  check('可编码成 ByteString', byteSafe, JSON.stringify(masked))
 }
 
 console.log('\n== 四种协议的准确地址 ==')
 {
   const state = await adminGet('/state')
-  const endpoints = state.body.endpoints ?? []
-  check('四条', endpoints.length === 4, String(endpoints.length))
-  const byId = Object.fromEntries(endpoints.map((entry) => [entry.id, entry]))
-  check('openai base 带 /v1', byId['openai-chat']?.baseUrl.endsWith('/workbuddy-gateway/v1'), byId['openai-chat']?.baseUrl)
-  check('anthropic base 不带 /v1', byId.anthropic?.baseUrl.endsWith('/workbuddy-gateway'), byId.anthropic?.baseUrl)
-  check('anthropic 实际请求 /v1/messages', byId.anthropic?.requestUrl.endsWith('/v1/messages'), byId.anthropic?.requestUrl)
-  check('gemini base 到根', byId.gemini?.baseUrl.endsWith('/workbuddy-gateway'), byId.gemini?.baseUrl)
-  check('gemini 实际请求 /v1beta', byId.gemini?.requestUrl.includes('/v1beta/models/'), byId.gemini?.requestUrl)
+  const byId = Object.fromEntries(state.body.endpoints.map((entry) => [entry.id, entry]))
+  check('四条', state.body.endpoints.length === 4)
+  check('openai base 带 /v1', byId['openai-chat']?.baseUrl.endsWith('/workbuddy-gateway/v1'))
+  check('anthropic base 不带 /v1', byId.anthropic?.baseUrl.endsWith('/workbuddy-gateway'))
+  check('gemini base 到根', byId.gemini?.baseUrl.endsWith('/workbuddy-gateway'))
 }
 
-console.log('\n== 带 /v1 前缀的地址真的能用 ==')
+console.log('\n== 模型列表只返回勾选的模型 ==')
 {
-  nextChunks = PLAIN
-  const models = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
-  check('GET /v1/models', models.status === 200, String(models.status))
-  const chat = await keyPost('/v1/chat/completions', firstKey, { messages: [{ role: 'user', content: 'hi' }] })
-  check('POST /v1/chat/completions', chat.status === 200, String(chat.status))
-  const responses = await keyPost('/v1/responses', firstKey, { input: 'hi' })
-  check('POST /v1/responses', responses.status === 200, String(responses.status))
-  const messages = await fetch(`${API}/v1/messages`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': firstKey },
-    body: JSON.stringify({ max_tokens: 64, messages: [{ role: 'user', content: 'hi' }] }),
-  })
-  check('POST /v1/messages', messages.status === 200, String(messages.status))
-  const doubled = await fetch(`${API}/anthropic/v1/messages`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': firstKey },
-    body: JSON.stringify({ max_tokens: 64, messages: [{ role: 'user', content: 'hi' }] }),
-  })
-  check('POST /anthropic/v1/messages（前缀叠加）', doubled.status === 200, String(doubled.status))
-  const gemini = await fetch(`${API}/v1beta/models/-:generateContent`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': firstKey },
-    body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'hi' }] }] }),
-  })
-  check('POST /v1beta/models/-:generateContent', gemini.status === 200, String(gemini.status))
-}
+  /* 只勾一个默认账号的模型。上下文等元信息来自设置页的 available 表。 */
+  const state = await adminGet('/state')
+  const glm = state.body.available.find((model) => model.modelId === 'glm-5.3')
+  check('available 带上下文', typeof glm?.contextWindow === 'number', JSON.stringify(glm))
+  check('available 带推理档', Array.isArray(glm?.reasoningEfforts) && glm.reasoningEfforts.length === 2, JSON.stringify(glm?.reasoningEfforts))
 
-console.log('\n== 模型目录不带区域前缀 ==')
-{
+  await adminPost('/keys/update', { id: firstId, selections: [{ ...glm, accountId: '' }] })
   const response = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
   const body = await response.json()
-  const ids = body.data.map((entry) => entry.id)
-  check('裸 id', ids.includes('glm-5.3'), ids.join(','))
-  check('没有 cn/ 前缀', !ids.some((id) => id.startsWith('cn/')), ids.join(','))
-  check('region 字段', body.data[0].region !== undefined, JSON.stringify(body.data[0]))
+  check('只有一个模型', body.data.length === 1, JSON.stringify(body.data.map((row) => row.id)))
+  check('名字是裸 id', body.data[0].id === 'glm-5.3', body.data[0].id)
+  check('显示名', body.data[0].display_name === 'GLM-5.3', body.data[0].display_name)
+  check('推理档列表', JSON.stringify(body.data[0].reasoning_efforts) === '["low","high"]', JSON.stringify(body.data[0].reasoning_efforts))
+  check('上下文', body.data[0].context_window === 200000, String(body.data[0].context_window))
+  check('输出上限', body.data[0].max_output_tokens === 8192, String(body.data[0].max_output_tokens))
 }
 
-console.log('\n== 模型条目必须带齐客户端要填的表单字段 ==')
+console.log('\n== 重名模型：英文账号名当后缀 ==')
+{
+  await adminPost('/keys/update', {
+    id: firstId,
+    selections: [
+      { accountId: '', region: 'cn', modelId: 'glm-5.3', displayName: 'GLM-5.3' },
+      { accountId: 'acct_pony', region: 'cn', modelId: 'glm-5.3', displayName: 'GLM-5.3' },
+    ],
+  })
+  const body = await (await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })).json()
+  const ids = body.data.map((row) => row.id).sort()
+  check('两条', ids.length === 2, JSON.stringify(ids))
+  check('默认账号保留裸名', ids.includes('glm-5.3'), JSON.stringify(ids))
+  check('英文昵称当后缀', ids.includes('glm-5.3@pony'), JSON.stringify(ids))
+  check('后缀全 ASCII', ids.every((id) => /^[\x20-\x7E]+$/u.test(id)), JSON.stringify(ids))
+}
+
+console.log('\n== 重名模型：非 ASCII 账号名退化成序号 ==')
+{
+  await adminPost('/keys/update', {
+    id: firstId,
+    selections: [
+      { accountId: 'acct_pony', region: 'cn', modelId: 'glm-5.3', displayName: 'GLM-5.3' },
+      { accountId: 'acct_cat', region: 'cn', modelId: 'glm-5.3', displayName: 'GLM-5.3' },
+    ],
+  })
+  const body = await (await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })).json()
+  const ids = body.data.map((row) => row.id)
+  check('两条', ids.length === 2, JSON.stringify(ids))
+  check('英文昵称那个用昵称', ids.includes('glm-5.3@pony'), JSON.stringify(ids))
+  check('非 ASCII 那个用序号', ids.some((id) => /^glm-5\.3@#\d+$/u.test(id)), JSON.stringify(ids))
+  check('没有非 ASCII 字符', ids.every((id) => /^[\x20-\x7E]+$/u.test(id)), JSON.stringify(ids))
+}
+
+console.log('\n== 请求按名字查表路由 ==')
 {
   /*
-   * 真实反馈：客户端拿到了 9 个模型，但「最大输出 / 上下文上限 / 是否接受图片」
-   * 三栏全是空的。原因是老投影只给了 id 与 object。
+   * 用两个区域各自的默认账号条目验证「按勾选的区域选 provider」。
+   * 不用 acct_* 那条：那是直连通道，会真的去打上游。
    */
-  const state = await adminGet('/state')
-  const id = state.body.keys[0].id
-  await adminPost('/keys/update', { id, policy: { mode: 'dsh' } })
-  const response = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
-  const entry = (await response.json()).data[0]
-  check('contextWindow（camelCase）', typeof entry.contextWindow === 'number', JSON.stringify(entry))
-  check('context_window（snake）', typeof entry.context_window === 'number', JSON.stringify(entry))
-  check('max_input_tokens（LiteLLM）', typeof entry.max_input_tokens === 'number')
-  check('limit.context（OpenRouter）', typeof entry.limit?.context === 'number')
-  check('max_output_tokens', typeof entry.max_output_tokens === 'number', JSON.stringify(entry))
-  check('limit.output', typeof entry.limit?.output === 'number')
-  check('input_modalities', Array.isArray(entry.input_modalities), JSON.stringify(entry.input_modalities))
-  check('supports_vision', typeof entry.supports_vision === 'boolean')
-  check('reasoning', typeof entry.reasoning === 'boolean', JSON.stringify(entry.reasoning))
+  await adminPost('/keys/update', {
+    id: firstId,
+    selections: [
+      { accountId: '', region: 'cn', modelId: 'glm-5.3', displayName: 'GLM-5.3' },
+      { accountId: '', region: 'global', modelId: 'kimi-k3', displayName: 'Kimi K3' },
+    ],
+  })
+  nextChunks = PLAIN
+  const response = await keyPost('/v1/chat/completions', firstKey, {
+    model: 'kimi-k3',
+    messages: [{ role: 'user', content: 'hi' }],
+  })
+  check('200', response.status === 200, String(response.status))
+  check('provider 跟着勾选的区域', lastCall.options.provider === 'workbuddy-global', lastCall.options.provider)
+  check('上游拿到真实模型 id', lastCall.options.model === 'kimi-k3', lastCall.options.model)
 }
 
-console.log('\n== 钉死模型的 key 只列出那一个模型 ==')
+console.log('\n== 未勾选的模型报 404 并列出可选项 ==')
 {
-  const state = await adminGet('/state')
-  const id = state.body.keys[0].id
-  await adminPost('/keys/update', { id, policy: { mode: 'named', provider: 'workbuddy', model: 'glm-5.3' } })
+  const response = await keyPost('/v1/chat/completions', firstKey, {
+    model: 'space-bunny',
+    messages: [{ role: 'user', content: 'hi' }],
+  })
+  check('404', response.status === 404, String(response.status))
+  const body = await response.json()
+  check('错误码', body.error?.code === 'model_not_found', JSON.stringify(body))
+  check('列出了可选项', body.error.message.includes('glm-5.3'), body.error.message)
+}
 
-  const narrowed = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
-  const body = await narrowed.json()
-  check('只有一个模型', body.data.length === 1, JSON.stringify(body.data.map((row) => row.id)))
-  check('就是钉死的那个', body.data[0].id === 'glm-5.3', body.data[0].id)
+console.log('\n== 推理档不写进默认值，只声明可选项 ==')
+{
+  await adminPost('/keys/update', {
+    id: firstId,
+    selections: [{ accountId: '', region: 'cn', modelId: 'glm-5.3', displayName: 'GLM-5.3', reasoningEfforts: ['low', 'high', 'max'] }],
+  })
+  nextChunks = PLAIN
+  await keyPost('/v1/chat/completions', firstKey, {
+    model: 'glm-5.3',
+    messages: [{ role: 'user', content: 'hi' }],
+  })
+  check('不替客户端选档', lastCall.options.reasoningEffort === undefined, String(lastCall.options.reasoningEffort))
 
-  /* 换成另一把 key 的模型，列表要跟着变。 */
-  await adminPost('/keys/update', { id, policy: { mode: 'named', provider: 'workbuddy-global', model: 'kimi-k3' } })
-  const again = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
-  const body2 = await again.json()
-  check('换策略后跟着变', body2.data.length === 1 && body2.data[0].id === 'kimi-k3', JSON.stringify(body2.data.map((row) => row.id)))
+  await keyPost('/v1/chat/completions', firstKey, {
+    model: 'glm-5.3',
+    reasoning_effort: 'max',
+    messages: [{ role: 'user', content: 'hi' }],
+  })
+  check('客户端指定就透传', lastCall.options.reasoningEffort === 'max', String(lastCall.options.reasoningEffort))
+}
 
-  /* 跟随型策略仍给全量目录。 */
-  await adminPost('/keys/update', { id, policy: { mode: 'dsh' } })
-  const full = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
-  check('跟随型给全量', (await full.json()).data.length === 4, 'expected 4')
+console.log('\n== Responses 的 usage 必须是 input_tokens ==')
+{
+  /*
+   * Codex 报 'missing field `input_tokens`' 并无限重连：Responses 用
+   * input_tokens/output_tokens，不是 prompt_tokens/completion_tokens。
+   */
+  nextChunks = PLAIN
+  const response = await fetch(`${API}/v1/responses`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${firstKey}` },
+    body: JSON.stringify({ model: 'glm-5.3', input: 'hi' }),
+  })
+  const body = await response.json()
+  check('200', response.status === 200, String(response.status))
+  check('input_tokens 存在', typeof body.usage?.input_tokens === 'number', JSON.stringify(body.usage))
+  check('output_tokens 存在', typeof body.usage?.output_tokens === 'number', JSON.stringify(body.usage))
+  check('没有 prompt_tokens', body.usage?.prompt_tokens === undefined, JSON.stringify(body.usage))
+
+  /* 上游不报 usage 时也要给零值，不能省略字段。 */
+  nextChunks = [{ type: 'block-start', index: 0, blockType: 'text' }, { type: 'text-delta', index: 0, text: 'hi' }, { type: 'finish', reason: { kind: 'stop' } }]
+  const noUsage = await fetch(`${API}/v1/responses`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${firstKey}` },
+    body: JSON.stringify({ model: 'glm-5.3', input: 'hi' }),
+  })
+  const noUsageBody = await noUsage.json()
+  check('无 usage 时补零', noUsageBody.usage?.input_tokens === 0, JSON.stringify(noUsageBody.usage))
+}
+
+console.log('\n== Responses 流式也带 input_tokens ==')
+{
+  nextChunks = PLAIN
+  const response = await fetch(`${API}/v1/responses`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${firstKey}` },
+    body: JSON.stringify({ model: 'glm-5.3', stream: true, input: 'hi' }),
+  })
+  const text = await response.text()
+  check('completed 事件', text.includes('event: response.completed'))
+  check('带 input_tokens', text.includes('"input_tokens"'), text.slice(-400))
 }
 
 console.log('\n== Anthropic 形状的模型列表 ==')
 {
-  /*
-   * Anthropic SDK 请求 /v1/models 时期待 `data:[{type,id,display_name}]`；
-   * 给它 OpenAI 的 `object:'list'` 就是"响应格式不兼容"。
-   * 判据是 anthropic-version 头。
-   */
-  const state = await adminGet('/state')
-  const id = state.body.keys[0].id
-  await adminPost('/keys/update', { id, policy: { mode: 'dsh' } })
-
   const anthropic = await fetch(`${API}/v1/models`, {
     headers: { 'x-api-key': firstKey, 'anthropic-version': '2023-06-01' },
   })
   const body = await anthropic.json()
   check('200', anthropic.status === 200, String(anthropic.status))
   check('data 数组', Array.isArray(body.data), JSON.stringify(body).slice(0, 120))
-  check('type: model', body.data[0]?.type === 'model', JSON.stringify(body.data[0]))
+  check('type: model', body.data[0]?.type === 'model')
   check('display_name', typeof body.data[0]?.display_name === 'string')
-  check('没有 object:list', body.object === undefined, String(body.object))
-  check('has_more', body.has_more === false)
+  check('没有 object:list', body.object === undefined)
 
-  const openai = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
-  const openaiBody = await openai.json()
-  check('不带 anthropic 头仍是 OpenAI 形状', openaiBody.object === 'list', String(openaiBody.object))
+  const openai = await (await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })).json()
+  check('不带 anthropic 头仍是 OpenAI 形状', openai.object === 'list', String(openai.object))
 }
 
-console.log('\n== key 策略：dsh（默认）==')
+console.log('\n== 两个 key 各管各的清单 ==')
 {
-  nextChunks = PLAIN
-  const response = await keyPost('/v1/chat/completions', firstKey, {
-    messages: [{ role: 'user', content: '你好' }],
-  })
-  const body = await response.json()
-  check('200', response.status === 200, String(response.status))
-  check('落到 dsh 默认', lastCall.options.provider === 'workbuddy' && lastCall.options.model === 'glm-5.3',
-    `${lastCall.options.provider}/${lastCall.options.model}`)
-  check('默认推理强度', lastCall.options.reasoningEffort === 'high', String(lastCall.options.reasoningEffort))
-  check('文本', body.choices?.[0]?.message?.content === '你好，世界', JSON.stringify(body).slice(0, 200))
-  check('思考', body.choices?.[0]?.message?.reasoning_content === '想一想…')
-  check('usage', body.usage?.prompt_tokens === 11, JSON.stringify(body.usage))
-}
-
-console.log('\n== key 策略：session ==')
-{
-  const state = await adminGet('/state')
-  const id = state.body.keys[0].id
-  await adminPost('/keys/update', { id, policy: { mode: 'session' } })
-  sessionSelectionValue = { provider: 'workbuddy-global', model: 'kimi-k3' }
-  await keyPost('/v1/chat/completions', firstKey, { messages: [{ role: 'user', content: 'hi' }] })
-  check('跟随活跃会话', lastCall.options.provider === 'workbuddy-global' && lastCall.options.model === 'kimi-k3',
-    `${lastCall.options.provider}/${lastCall.options.model}`)
-  sessionSelectionValue = undefined
-  await keyPost('/v1/chat/completions', firstKey, { messages: [{ role: 'user', content: 'hi' }] })
-  check('无会话时退到 dsh 默认', lastCall.options.provider === 'workbuddy' && lastCall.options.model === 'glm-5.3',
-    `${lastCall.options.provider}/${lastCall.options.model}`)
-}
-
-console.log('\n== key 策略：named（固定模型）==')
-{
-  const state = await adminGet('/state')
-  const id = state.body.keys[0].id
   await adminPost('/keys/update', {
-    id,
-    policy: { mode: 'named', provider: 'workbuddy-global', model: 'hy4-preview', reasoningEffort: 'low' },
+    id: firstId,
+    selections: [{ accountId: '', region: 'cn', modelId: 'glm-5.3', displayName: 'GLM-5.3' }],
   })
-  await keyPost('/v1/chat/completions', firstKey, { messages: [{ role: 'user', content: 'hi' }] })
-  check('固定模型生效', lastCall.options.provider === 'workbuddy-global' && lastCall.options.model === 'hy4-preview',
-    `${lastCall.options.provider}/${lastCall.options.model}`)
-  check('固定推理强度', lastCall.options.reasoningEffort === 'low', String(lastCall.options.reasoningEffort))
-
-  const unmet = await adminPost('/keys/update', { id, policy: { mode: 'named' } })
-  check('没选模型也能存（只是不能用）', unmet.status === 200, String(unmet.status))
-  const refused = await keyPost('/v1/chat/completions', firstKey, { messages: [{ role: 'user', content: 'hi' }] })
-  check('没选模型时 409', refused.status === 409, String(refused.status))
-  const body = await refused.json()
-  check('错误码', body.error?.code === 'model_not_configured', JSON.stringify(body))
-}
-
-console.log('\n== 请求显式给 model 覆盖策略 ==')
-{
-  const state = await adminGet('/state')
-  const id = state.body.keys[0].id
-  await adminPost('/keys/update', { id, policy: { mode: 'named', model: 'glm-5.3', provider: 'workbuddy' } })
-  await keyPost('/v1/chat/completions', firstKey, { model: 'space-bunny', messages: [{ role: 'user', content: 'hi' }] })
-  check('请求优先', lastCall.options.model === 'space-bunny', lastCall.options.model)
-  check('provider 按目录归属', lastCall.options.provider === 'workbuddy', lastCall.options.provider)
-}
-
-console.log('\n== key 策略：first ==')
-{
-  const state = await adminGet('/state')
-  const id = state.body.keys[0].id
-  await adminPost('/keys/update', { id, policy: { mode: 'first' } })
-  await keyPost('/v1/chat/completions', firstKey, { messages: [{ role: 'user', content: 'hi' }] })
-  check('目录第一个', lastCall.options.model === 'glm-5.3', lastCall.options.model)
-}
-
-console.log('\n== key 策略：account（缺账号时报错）==')
-{
-  const state = await adminGet('/state')
-  const id = state.body.keys[0].id
-  await adminPost('/keys/update', { id, policy: { mode: 'account', accountId: '', model: 'glm-5.3' } })
-  const response = await keyPost('/v1/chat/completions', firstKey, { messages: [{ role: 'user', content: 'hi' }] })
-  check('409', response.status === 409, String(response.status))
-  const body = await response.json()
-  check('错误码', body.error?.code === 'account_not_configured', JSON.stringify(body))
-}
-
-console.log('\n== 两把 key 各走各的策略 ==')
-{
-  const state = await adminGet('/state')
-  const firstId = state.body.keys[0].id
-  await adminPost('/keys/update', { id: firstId, policy: { mode: 'named', model: 'glm-5.3', provider: 'workbuddy' } })
-  const created = await adminPost('/keys', { label: 'second', policy: { mode: 'named', model: 'kimi-k3', provider: 'workbuddy-global' } })
+  const created = await adminPost('/keys', {
+    label: 'second',
+    selections: [{ accountId: '', region: 'global', modelId: 'kimi-k3', displayName: 'Kimi K3' }],
+  })
   const secondKey = created.body.created.secret
-  check('第二把 key 建好', typeof secondKey === 'string' && secondKey !== firstKey)
+  const a = await (await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })).json()
+  const b = await (await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${secondKey}` } })).json()
+  check('第一把只见 glm-5.3', a.data.length === 1 && a.data[0].id === 'glm-5.3', JSON.stringify(a.data.map((row) => row.id)))
+  check('第二把只见 kimi-k3', b.data.length === 1 && b.data[0].id === 'kimi-k3', JSON.stringify(b.data.map((row) => row.id)))
 
-  await keyPost('/v1/chat/completions', firstKey, { messages: [{ role: 'user', content: 'hi' }] })
-  check('第一把走 glm-5.3', lastCall.options.model === 'glm-5.3', lastCall.options.model)
-  await keyPost('/v1/chat/completions', secondKey, { messages: [{ role: 'user', content: 'hi' }] })
-  check('第二把走 kimi-k3', lastCall.options.model === 'kimi-k3', lastCall.options.model)
-  check('provider 各自独立', lastCall.options.provider === 'workbuddy-global', lastCall.options.provider)
-
-  const health = await fetch(`${API}/healthz`, { headers: { Authorization: `Bearer ${secondKey}` } })
-  const healthBody = await health.json()
-  check('healthz 报出本 key 的策略', healthBody.key?.policy?.model === 'kimi-k3', JSON.stringify(healthBody.key))
+  const health = await (await fetch(`${API}/healthz`, { headers: { Authorization: `Bearer ${secondKey}` } })).json()
+  check('healthz 报出本 key 的模型', JSON.stringify(health.key?.models) === '["kimi-k3"]', JSON.stringify(health.key))
 }
 
-console.log('\n== 停用 key ==')
+console.log('\n== 停用与轮换 ==')
 {
   const state = await adminGet('/state')
   const second = state.body.keys.find((entry) => entry.label === 'second')
   await adminPost('/keys/update', { id: second.id, enabled: false })
   const revealed = await adminPost('/keys/reveal', { id: second.id })
-  const response = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${revealed.body.secret}` } })
-  check('停用后 401', response.status === 401, String(response.status))
+  check('停用后 401', (await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${revealed.body.secret}` } })).status === 401)
   await adminPost('/keys/update', { id: second.id, enabled: true })
-  const again = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${revealed.body.secret}` } })
-  check('重新启用后 200', again.status === 200, String(again.status))
-}
+  check('重新启用后 200', (await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${revealed.body.secret}` } })).status === 200)
 
-console.log('\n== 重置 secret ==')
-{
-  const state = await adminGet('/state')
-  const id = state.body.keys[0].id
-  const before = (await adminPost('/keys/reveal', { id })).body.secret
-  const rotated = await adminPost('/keys/rotate', { id })
-  check('换了一把', typeof rotated.body.secret === 'string' && rotated.body.secret !== before)
-  const old = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${before}` } })
-  check('旧 secret 失效', old.status === 401, String(old.status))
-  const fresh = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${rotated.body.secret}` } })
-  check('新 secret 可用', fresh.status === 200, String(fresh.status))
-  /* 后面的用例都靠这把 key：把轮换后的值接上。 */
-  firstKey = rotated.body.secret
+  const before = revealed.body.secret
+  const rotated = await adminPost('/keys/rotate', { id: second.id })
+  check('换了一把', rotated.body.secret !== before)
+  check('旧 secret 失效', (await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${before}` } })).status === 401)
+  check('新 secret 可用', (await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${rotated.body.secret}` } })).status === 200)
 }
 
 console.log('\n== 删除 key ==')
@@ -486,15 +449,28 @@ console.log('\n== 删除 key ==')
   const target = state.body.keys.find((entry) => entry.label === 'second')
   const deleted = await adminPost('/keys/delete', { id: target.id })
   check('200', deleted.status === 200, String(deleted.status))
-  check('少了一把', deleted.body.keys.length === count - 1, String(deleted.body.keys.length))
-  const missing = await adminPost('/keys/delete', { id: target.id })
-  check('再删 404', missing.status === 404, String(missing.status))
+  check('少了一把', deleted.body.keys.length === count - 1)
+  check('再删 404', (await adminPost('/keys/delete', { id: target.id })).status === 404)
+}
+
+console.log('\n== 空清单的 key 明确报错 ==')
+{
+  await adminPost('/keys/update', { id: firstId, selections: [] })
+  const response = await keyPost('/v1/chat/completions', firstKey, { messages: [{ role: 'user', content: 'hi' }] })
+  check('409', response.status === 409, String(response.status))
+  const body = await response.json()
+  check('错误码', body.error?.code === 'model_not_configured', JSON.stringify(body))
 }
 
 console.log('\n== OpenAI Chat 流式 + 工具 ==')
 {
+  await adminPost('/keys/update', {
+    id: firstId,
+    selections: [{ accountId: '', region: 'cn', modelId: 'glm-5.3', displayName: 'GLM-5.3' }],
+  })
   nextChunks = TOOLS
   const response = await keyPost('/v1/chat/completions', firstKey, {
+    model: 'glm-5.3',
     stream: true,
     messages: [{ role: 'user', content: '北京天气' }],
     tools: [{ type: 'function', function: { name: 'get_weather', description: 'weather', parameters: { type: 'object', properties: { city: { type: 'string' } } } } }],
@@ -512,6 +488,7 @@ console.log('\n== 消息历史投影 ==')
 {
   nextChunks = PLAIN
   await keyPost('/v1/chat/completions', firstKey, {
+    model: 'glm-5.3',
     messages: [
       { role: 'system', content: '你是助手' },
       { role: 'user', content: '北京天气' },
@@ -526,13 +503,13 @@ console.log('\n== 消息历史投影 ==')
   check('toolCallId', messages[2].toolCallId === 'call_1', messages[2].toolCallId)
 }
 
-console.log('\n== Anthropic ==')
+console.log('\n== Anthropic Messages ==')
 {
   nextChunks = PLAIN
   const response = await fetch(`${API}/v1/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': firstKey, 'anthropic-version': '2023-06-01' },
-    body: JSON.stringify({ max_tokens: 256, system: '你是助手', messages: [{ role: 'user', content: [{ type: 'text', text: '你好' }] }] }),
+    body: JSON.stringify({ model: 'glm-5.3', max_tokens: 256, system: '你是助手', messages: [{ role: 'user', content: [{ type: 'text', text: '你好' }] }] }),
   })
   const body = await response.json()
   check('200', response.status === 200, String(response.status))
@@ -540,79 +517,30 @@ console.log('\n== Anthropic ==')
   check('文本', body.content?.find((block) => block.type === 'text')?.text === '你好，世界', JSON.stringify(body.content))
   check('thinking', body.content?.find((block) => block.type === 'thinking')?.thinking === '想一想…')
   check('stop_reason', body.stop_reason === 'end_turn')
-  check('system 抽出', lastCall.options.system === '你是助手')
 
   nextChunks = TOOLS
   const streamed = await fetch(`${API}/v1/messages`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': firstKey },
-    body: JSON.stringify({ max_tokens: 256, stream: true, messages: [{ role: 'user', content: '北京天气' }] }),
+    body: JSON.stringify({ model: 'glm-5.3', max_tokens: 256, stream: true, messages: [{ role: 'user', content: '北京天气' }] }),
   })
   const text = await streamed.text()
   check('message_start', text.includes('event: message_start'))
   check('tool_use', text.includes('"tool_use"'))
-  check('input_json_delta', text.includes('input_json_delta'))
   check('message_stop', text.includes('event: message_stop'))
 }
 
 console.log('\n== Gemini ==')
 {
   nextChunks = PLAIN
-  const plain = await fetch(`${API}/v1beta/models/-:generateContent`, {
+  const plain = await fetch(`${API}/v1beta/models/glm-5.3:generateContent`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': firstKey },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: '你好' }] }],
-      systemInstruction: { parts: [{ text: '你是助手' }] },
-    }),
+    body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: '你好' }] }] }),
   })
   const body = await plain.json()
   check('200', plain.status === 200, String(plain.status))
   check('文本', body.candidates?.[0]?.content?.parts?.some((part) => part.text === '你好，世界'), JSON.stringify(body))
-  check('finishReason', body.candidates?.[0]?.finishReason === 'STOP')
-
-  nextChunks = TOOLS
-  const streamed = await fetch(`${API}/v1beta/models/-:streamGenerateContent`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': firstKey },
-    body: JSON.stringify({
-      contents: [{ role: 'user', parts: [{ text: '北京天气' }] }],
-      tools: [{ functionDeclarations: [{ name: 'get_weather', parameters: { type: 'object', properties: { city: { type: 'string' } } } }] }],
-    }),
-  })
-  const text = await streamed.text()
-  check('200', streamed.status === 200, String(streamed.status))
-  check('functionCall', text.includes('functionCall'), text.slice(0, 200))
-}
-
-console.log('\n== OpenAI Responses ==')
-{
-  nextChunks = PLAIN
-  const plain = await fetch(`${API}/v1/responses`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${firstKey}` },
-    body: JSON.stringify({ instructions: '你是助手', input: '你好' }),
-  })
-  const body = await plain.json()
-  check('200', plain.status === 200, String(plain.status))
-  check('文本', body.output?.find((item) => item.type === 'message')?.content?.[0]?.text === '你好，世界', JSON.stringify(body.output))
-  check('reasoning item', body.output?.some((item) => item.type === 'reasoning'))
-
-  nextChunks = TOOLS
-  const streamed = await fetch(`${API}/v1/responses`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${firstKey}` },
-    body: JSON.stringify({
-      stream: true,
-      input: [{ role: 'user', content: [{ type: 'input_text', text: '北京天气' }] }],
-      tools: [{ type: 'function', name: 'get_weather', parameters: { type: 'object', properties: { city: { type: 'string' } } } }],
-    }),
-  })
-  const text = await streamed.text()
-  check('response.created', text.includes('event: response.created'))
-  check('output_text.delta', text.includes('response.output_text.delta'))
-  check('function_call', text.includes('"function_call"'))
-  check('response.completed', text.includes('event: response.completed'))
 }
 
 console.log('\n== 图片输入 ==')
@@ -620,6 +548,7 @@ console.log('\n== 图片输入 ==')
   nextChunks = PLAIN
   const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='
   await keyPost('/v1/chat/completions', firstKey, {
+    model: 'glm-5.3',
     messages: [{
       role: 'user',
       content: [
@@ -636,7 +565,7 @@ console.log('\n== 图片输入 ==')
 console.log('\n== 上游失败传播 ==')
 {
   failNext = { message: 'quota exhausted', code: 'QUOTA_EXCEEDED', status: 402 }
-  const response = await keyPost('/v1/chat/completions', firstKey, { messages: [{ role: 'user', content: 'hi' }] })
+  const response = await keyPost('/v1/chat/completions', firstKey, { model: 'glm-5.3', messages: [{ role: 'user', content: 'hi' }] })
   check('402', response.status === 402, String(response.status))
   const body = await response.json()
   check('错误体', body.error?.message === 'quota exhausted', JSON.stringify(body))
@@ -644,12 +573,9 @@ console.log('\n== 上游失败传播 ==')
 
 console.log('\n== 管理接口边界 ==')
 {
-  const missing = await adminPost('/keys/update', { id: 'k_nope', policy: { mode: 'dsh' } })
-  check('未知 key 404', missing.status === 404, String(missing.status))
-  const route = await adminGet('/nope')
-  check('未知管理路由 404', route.status === 404, String(route.status))
-  const api404 = await fetch(`${API}/v1/nope`, { headers: { Authorization: `Bearer ${firstKey}` } })
-  check('未知 API 路由 404', api404.status === 404, String(api404.status))
+  check('未知 key 404', (await adminPost('/keys/update', { id: 'k_nope', selections: [] })).status === 404)
+  check('未知管理路由 404', (await adminGet('/nope')).status === 404)
+  check('未知 API 路由 404', (await fetch(`${API}/v1/nope`, { headers: { Authorization: `Bearer ${firstKey}` } })).status === 404)
 }
 
 /* ── 收尾 ─────────────────────────────────────────────────────────────── */

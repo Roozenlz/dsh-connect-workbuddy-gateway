@@ -1,22 +1,24 @@
 /**
- * 模型目录的三种投影。
+ * 模型目录的对外投影。
  *
- * 目录来源有两个，合起来去重：
- *   1. 宿主 adapter 的目录（`llm.listModels`）—— 已按插件设置过滤过启用项；
- *   2. 直连通道读的上游目录 —— 只在宿主目录为空（provider 未注册）时兜底。
+ * **这一层只做一件事**：把 key 勾选的模型清单投影成客户端能读的形状。
  *
- * **投影必须带足元信息。** 客户端「获取模型列表」不只是拿 id 列表：它要用
- * context window、max output、是否支持图片来填自己的表单。字段名各家不同，
- * 所以一条目上同时给出常见的那几种写法（OpenAI 的 `context_window` / camelCase
- * 的 `contextWindow` / LiteLLM 的 `max_input_tokens` / OpenRouter 的 `limit`），
- * 一个条目体积很小，而少一个字段就要用户手填。
+ * 字段对照 cc-switch 的「模型映射」表（菜单显示名 / 实际请求模型 / 上下文窗口 /
+ * 思考等级），见 docs/user-manual/zh/2-providers/2.1-add.md。它的「获取模型列表」
+ * 调的就是 OpenAI 兼容的 `/v1/models`，所以这里既给标准字段，也给 cc-switch
+ * 认识的那几个别名——多给几个字段的成本很低，少一个就要用户手填。
+ *
+ * **推理等级只在这里列出，不在请求里强制。** 用户要求「不提供推理等级选项，让
+ * 客户端自己选」，所以网关不读 key 上的默认档，只把「这个模型支持哪几档」告诉
+ * 客户端；客户端发来的 `reasoning_effort` 原样透传给上游。
  */
 
 import { hostCatalog } from './host-backend.js'
 import { directCatalog } from './direct.js'
 import { regionOfProvider } from './resolve.js'
+import { buildCatalog } from './catalog.js'
 
-/** 汇总所有 provider 的模型，并标注区域。 */
+/** 一个 provider 的模型全表（含元信息）。 */
 export async function collectModels(env) {
   const entries = []
   const seen = new Set()
@@ -50,116 +52,127 @@ export async function directModelsByRegion(env) {
 }
 
 /**
- * 把一把 key 的策略收窄成「它实际会用的那些模型」。
+ * 模型全表，供设置页的勾选界面用。
  *
- * 这是用户要的行为：一把钉死模型的 key，列表里就只该出现那个模型 —— 否则
- * 客户端会让用户从 9 个里挑一个，而挑哪个最后都走同一个模型，是骗人的。
- *
- * 返回 `undefined` 表示「不按策略收窄」（跟随型策略下模型空间是整个目录）。
- *
- * @param keyEntry 本次请求的 key
- * @param entries 全量目录
- * @returns 收窄后的条目，或 undefined
+ * 每一项都带上「要写进勾选清单」的全部字段，于是界面勾一下就能存下完整信息
+ * （上下文、输出上限、推理档、模态），日后展示不需要再查一遍上游。
  */
-export function narrowToPolicy(keyEntry, entries) {
-  const policy = keyEntry?.policy
-  if (policy === undefined) return undefined
-  if (policy.mode !== 'named' && policy.mode !== 'account') return undefined
+export async function catalogForSettings(env, accounts) {
+  const entries = await collectModels(env)
+  const pool = entries.length > 0 ? entries : await directModelsByRegion(env)
+  return pool.map((entry) => ({
+    accountId: '',
+    region: entry.region,
+    modelId: entry.id,
+    displayName: entry.name ?? entry.id,
+    ...(entry.contextWindow === undefined ? {} : { contextWindow: entry.contextWindow }),
+    ...(entry.maxTokens === undefined ? {} : { maxTokens: entry.maxTokens }),
+    reasoningEfforts: effortsOf(entry.reasoning),
+    inputModalities: modalitiesOf(entry.inputModalities),
+    /* 供界面显示：模型属于哪个区域。 */
+    provider: entry.provider,
+  }))
+}
 
-  const wanted = typeof policy.model === 'string' ? policy.model.trim() : ''
-  if (wanted === '') return undefined
+/** 推理档列表：adapter 报了就用它的，否则给一组保守的常用档位。 */
+export function effortsOf(reasoning) {
+  const declared = Array.isArray(reasoning?.efforts)
+    ? reasoning.efforts.map((effort) => (typeof effort === 'string' ? effort : effort?.id)).filter((id) => typeof id === 'string' && id !== '')
+    : []
+  if (declared.length > 0) return declared
+  /* 上游没声明时不猜具体档位，给空数组 —— 客户端就不会显示一个假的档位选择器。 */
+  return []
+}
 
-  const matches = entries.filter((entry) => entry.id === wanted)
-  if (matches.length === 0) return undefined
-
-  /*
-   * 策略里钉了 provider 就优先那一条；否则全留（同名模型在两个区都存在时，
-   * 用户该看到两行，因为 `owned_by` 不同）。
-   */
-  if (typeof policy.provider === 'string' && policy.provider !== '') {
-    const scoped = matches.filter((entry) => entry.provider === policy.provider)
-    if (scoped.length > 0) return scoped
-  }
-  return matches
+function modalitiesOf(inputModalities) {
+  if (!Array.isArray(inputModalities)) return ['text']
+  const kept = inputModalities.filter((mode) => mode === 'text' || mode === 'image')
+  return kept.length === 0 ? ['text'] : kept
 }
 
 /**
- * 一个条目 → 客户端能读懂的模型描述。
+ * 把一个条目投影成客户端认识的模型描述。
  *
- * 字段名按「同一个意思，多种叫法」并列给出，因为读取方各认一套：
- *
- *   OpenAI 官方      `context_window` / `max_output_tokens`
+ * 字段名并列出多种叫法，因为读取方各认一套：
+ *   OpenAI 官方        `context_window` / `max_output_tokens`
  *   pi-ai / OpenRouter `contextWindow` / `maxTokens` / `limit.{context,output}`
- *   LiteLLM           `max_input_tokens` / `max_output_tokens`
- *
- * `input_modalities` / `supports_vision` 是给「是否接受图片」那一栏用的。
+ *   LiteLLM            `max_input_tokens` / `max_output_tokens`
+ *   cc-switch          `display_name`（菜单显示名） + `id`（实际请求模型）
  */
-function describeModel(entry, preferences) {
+function describeModel(entry) {
   const contextWindow = positive(entry.contextWindow)
   const maxTokens = positive(entry.maxTokens)
-  const images = entry.inputModalities === undefined
-    ? preferences.images !== false
-    : entry.inputModalities.includes('image')
+  const modalities = Array.isArray(entry.inputModalities) ? entry.inputModalities : ['text']
+  const images = modalities.includes('image')
+  const efforts = Array.isArray(entry.reasoningEfforts) ? entry.reasoningEfforts : []
 
   return {
-    id: entry.id,
+    /* `id` 就是客户端要填进请求 model 字段的那个名字（重名时带账号后缀）。 */
+    id: entry.name,
     object: 'model',
     created: 0,
-    owned_by: entry.provider ?? 'workbuddy',
-    name: entry.name ?? entry.id,
-    /* 区域：不在标准里，但客户端据此区分两个区的同名模型。 */
-    region: entry.region,
+    owned_by: entry.accountId === '' ? 'workbuddy' : 'workbuddy-account',
+    /* cc-switch 的「菜单显示名」用它；没有就退到 id。 */
+    display_name: entry.displayName === '' ? entry.name : entry.displayName,
+    name: entry.displayName === '' ? entry.name : entry.displayName,
+    /* 上游真实模型 id —— 重名时它与 id 不同。 */
+    model: entry.modelId,
+    ...(entry.region === undefined ? {} : { region: entry.region }),
 
-    /* 上下文上限：四种写法。 */
     ...(contextWindow === undefined ? {} : {
       context_window: contextWindow,
       contextWindow,
       context_length: contextWindow,
       max_input_tokens: contextWindow,
-      limit: {
-        context: contextWindow,
-        ...(maxTokens === undefined ? {} : { output: maxTokens }),
-      },
+      limit: { context: contextWindow, ...(maxTokens === undefined ? {} : { output: maxTokens }) },
     }),
 
-    /* 输出上限。`max_output_tokens_estimated` 说明这个值不是上游明说的。 */
     ...(maxTokens === undefined ? {} : {
       max_output_tokens: maxTokens,
       maxTokens,
       max_completion_tokens: maxTokens,
-      ...(entry.maxTokensEstimated === true ? { max_output_tokens_estimated: true } : {}),
     }),
 
-    /* 模态。 */
-    input_modalities: images ? ['text', 'image'] : ['text'],
+    input_modalities: modalities,
     supports_vision: images,
     supports_images: images,
 
-    /* 有的客户端把「能不能调工具」也列出来。 */
-    ...(entry.reasoning === undefined ? {} : {
-      reasoning: true,
-      ...(Array.isArray(entry.reasoning.efforts) && entry.reasoning.efforts.length > 0
-        ? { reasoning_efforts: entry.reasoning.efforts.map((effort) => effort.id) }
-        : {}),
-    }),
+    /* 推理能力：只声明「有哪些档」，不替客户端选。 */
+    reasoning: efforts.length > 0,
+    ...(efforts.length === 0 ? {} : { reasoning_efforts: efforts, reasoningEffort: efforts }),
   }
 }
 
 function positive(value) {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined
 }
 
 /**
  * OpenAI `/v1/models` 形状。
- *
- * @param entries 已按策略收窄过的条目
- * @param preferences 插件级偏好（`images`）
+ * @param catalog {@link buildCatalog} 的结果
  */
-export function openAiCatalog(entries, preferences = {}) {
+export function openAiCatalog(catalog) {
+  return { object: 'list', data: catalog.map(describeModel) }
+}
+
+/** Anthropic `/v1/models` 形状（SDK 读 `data:[{type,id,display_name}]`）。 */
+export function anthropicCatalog(catalog) {
   return {
-    object: 'list',
-    data: entries.map((entry) => describeModel(entry, preferences)),
+    data: catalog.map((entry) => {
+      const one = describeModel(entry)
+      return {
+        type: 'model',
+        id: one.id,
+        display_name: one.display_name,
+        created_at: new Date(0).toISOString(),
+        ...(one.context_window === undefined ? {} : { context_window: one.context_window, max_input_tokens: one.context_window }),
+        ...(one.max_output_tokens === undefined ? {} : { max_output_tokens: one.max_output_tokens }),
+      }
+    }),
+    has_more: false,
+    first_id: catalog.length === 0 ? null : catalog[0].name,
+    last_id: catalog.length === 0 ? null : catalog[catalog.length - 1].name,
   }
 }
 
-export { regionOfProvider }
+export { regionOfProvider, buildCatalog }

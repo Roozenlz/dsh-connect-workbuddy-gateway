@@ -133,7 +133,7 @@ function numberOrUndefined(value) {
 export async function handleChat(req, res, env) {
   const body = await readJson(req)
   const request = parseChatRequest(body)
-  const target = await resolve(env.ctx, env.config, env.providers(), env.key, request.model)
+  const target = resolve(env.providers(), env.key, request.model, env.config)
   const modelName = request.model === '' ? target.model : request.model
   const signal = abortSignalOf(res, req)
 

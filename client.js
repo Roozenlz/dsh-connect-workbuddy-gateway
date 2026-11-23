@@ -1,20 +1,21 @@
 /**
  * 设置 → WorkBuddy 模型网关（Client 半）。
  *
- * 设计上有三条硬约束，都是踩出来的：
+ * 三条来自真实故障的硬约束：
  *
  * 1. **主题 token 必须用真实存在的那几个。** DSH 的 Theme 只注册了
  *    `--dsw-alias-label-primary/secondary/tertiary`、`--dsw-alias-bg-base/layer-1/
  *    layer-2/overlay`、`--dsw-alias-border-l1/l2`、`--dsw-alias-brand-primary` 与
- *    几个 `state-*`。写别的名字不会报错，只会**静默回退**，于是界面看起来"没样式"。
+ *    几个 `state-*`。写别的名字不会报错，只会**静默回退**，界面看起来"没样式"。
  *
- * 2. **掩码绝不可复制。** 曾把掩码当普通文本展示并给了复制按钮，用户复制到的
- *    `wbg-v1-9…VJq0` 里的 `…`（U+2026）放进 HTTP 头会让客户端直接抛
- *    `Cannot convert argument to a ByteString … value of 8230`。所以：掩码是
- *    `*` 号、不提供复制；只有明文（reveal 之后）才有复制按钮。
+ * 2. **掩码绝不可复制。** 掩码里的 `…`（U+2026）放进 HTTP 头会让客户端抛
+ *    `Cannot convert argument to a ByteString … value of 8230`。所以掩码是 `*` 号、
+ *    不提供复制；只有明文（reveal 之后）才有复制按钮。
  *
- * 3. **地址要给成品。** 每种协议该填什么都算好了，用户点一下复制就行，
- *    不用自己判断要不要加 `/v1`。
+ * 3. **地址要给成品。** 每种协议该填什么都算好了，用户点一下复制就行。
+ *
+ * 这一版的模型配置是「勾选清单」：**没有策略模式**，用户直接勾要暴露哪些
+ * （账号, 模型）组合，列表就返回哪些。重名的模型名后面自动挂账号后缀。
  */
 
 window.__ModuleLoader__.load({
@@ -22,7 +23,7 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react')
     const h = React.createElement
-    const { useState, useEffect, useCallback, useRef } = React
+    const { useState, useEffect, useCallback, useRef, useMemo } = React
 
     const NS = 'workbuddy-gateway'
     const ADMIN = '/plugins/dsh-workbuddy-gateway'
@@ -32,120 +33,113 @@ window.__ModuleLoader__.load({
     const TEXT = {
       zh: {
         title: 'WorkBuddy 模型网关',
-        subtitle: '本机任意应用都能用这些 WorkBuddy 模型。每把 API key 自带路由策略。',
+        subtitle: '本机任意应用都能用这些 WorkBuddy 模型。每把 API key 勾选自己对外开放的模型。',
         endpoints: '接口地址',
         endpointsHint: '按你用的客户端选一行，复制「Base URL」填进去即可。',
-        baseUrl: 'Base URL',
         requestUrl: '实际请求',
-        auth: '鉴权头',
         root: '网关根地址',
         keys: 'API keys',
         addKey: '新建 key',
         noKeys: '还没有 key。点「新建 key」创建第一把。',
         reveal: '显示明文',
-        hide: '收起',
         rotate: '重置',
         remove: '删除',
         label: '名称',
         labelPlaceholder: '例如：Codex CLI',
-        policy: '路由策略',
-        mode_dsh: '跟随 DSH 默认模型',
-        mode_session: '跟随最近活跃会话',
-        mode_current: '跟随当前在用的模型',
-        mode_named: '固定模型',
-        mode_account: '固定账号',
-        mode_first: '目录第一个模型',
-        provider: '区域',
-        model: '模型',
-        account: '账号',
-        effort: '推理强度',
-        effort_auto: '模型默认',
+        models: '对外提供的模型',
+        modelsHint: '勾选要暴露给这个 key 的模型。同名模型会自动加账号后缀区分。',
+        currentDefault: '默认账号',
+        pickAccount: '选择账号',
+        allAccounts: '全部账号（默认）',
+        groupDefault: '默认账号（跟随插件设置）',
+        selected: '已选',
+        noneSelected: '还没有勾选任何模型，这把 key 暂时不能用。',
+        willExpose: '客户端会看到',
         save: '保存',
         saved: '已保存',
         enabled: '启用',
-        currentDsh: 'DSH 默认',
-        currentSession: '活跃会话',
-        none: '不限',
         loading: '正在读取配置…',
         copy: '复制',
         copied: '已复制',
         secretHidden: '点「显示明文」后才有可复制的内容',
         secretCopied: '明文只在这个页面显示，刷新后需要重新点开',
         confirmRemove: '删除后这把 key 立即失效，且无法恢复。确定删除？',
-        selectModel: '选择模型',
-        selectAccount: '选择账号',
-        needsModel: '还没选模型，这把 key 暂时不能用。',
-        needsAccount: '还没选账号，这把 key 暂时不能用。',
         created: '已创建新 key，明文如下。请立刻复制保存 —— 关掉这个提示后需要重新点「显示明文」。',
         dismiss: '我知道了',
         guide: '怎么用',
-        guideHint: '把上面某一行的 Base URL 和任意一把 key 的明文填进客户端；请求体里的 model 可以不写。',
+        guideHint: '把上面某一行的 Base URL 和任意一把 key 的明文填进客户端。',
         errorTitle: '出错了',
         configPath: '配置文件',
+        search: '搜索模型…',
+        selectAll: '全选当前',
+        clearAll: '清空',
+        reasoning: '推理',
+        noEfforts: '上游未声明推理档',
+        regionCn: '国内版',
+        regionGlobal: '国际版',
+        dupSuffix: '重名后缀',
+        dupSuffixHint: '纯英文账号名直接用昵称，否则用序号。',
+        accountSafe: '可直接用昵称作后缀',
+        accountUnsafe: '昵称含非 ASCII，将用序号',
       },
       en: {
         title: 'WorkBuddy Gateway',
-        subtitle: 'Any app on this machine can use these WorkBuddy models. Each API key carries its own routing policy.',
+        subtitle: 'Any app on this machine can use these WorkBuddy models. Each API key picks the models it exposes.',
         endpoints: 'Endpoints',
         endpointsHint: 'Pick the row for your client and copy its Base URL.',
-        baseUrl: 'Base URL',
         requestUrl: 'Actual request',
-        auth: 'Auth header',
         root: 'Gateway root',
         keys: 'API keys',
         addKey: 'New key',
         noKeys: 'No keys yet. Use "New key" to create the first one.',
         reveal: 'Show secret',
-        hide: 'Hide',
         rotate: 'Rotate',
         remove: 'Delete',
         label: 'Label',
         labelPlaceholder: 'e.g. Codex CLI',
-        policy: 'Routing policy',
-        mode_dsh: 'Follow the DSH default model',
-        mode_session: 'Follow the active session',
-        mode_current: 'Follow whatever is in use now',
-        mode_named: 'Fixed model',
-        mode_account: 'Fixed account',
-        mode_first: 'First catalog model',
-        provider: 'Region',
-        model: 'Model',
-        account: 'Account',
-        effort: 'Reasoning effort',
-        effort_auto: 'Model default',
+        models: 'Models this key serves',
+        modelsHint: 'Tick the models this key should expose. Duplicate names get an account suffix.',
+        currentDefault: 'Default account',
+        pickAccount: 'Pick an account',
+        allAccounts: 'All accounts (default)',
+        groupDefault: 'Default account (follows the plugin)',
+        selected: 'selected',
+        noneSelected: 'No models ticked yet, so this key cannot be used.',
+        willExpose: 'The client will see',
         save: 'Save',
         saved: 'Saved',
         enabled: 'Enabled',
-        currentDsh: 'DSH default',
-        currentSession: 'Active session',
-        none: 'any',
         loading: 'Reading configuration…',
         copy: 'Copy',
         copied: 'Copied',
         secretHidden: 'Use "Show secret" to get something copyable',
         secretCopied: 'The secret stays on this page only; reopen it after a refresh',
         confirmRemove: 'The key stops working immediately and cannot be recovered. Delete it?',
-        selectModel: 'Select model',
-        selectAccount: 'Select account',
-        needsModel: 'No model chosen yet, so this key cannot be used.',
-        needsAccount: 'No account chosen yet, so this key cannot be used.',
         created: 'New key created. Copy the secret now — after dismissing this you will need "Show secret" again.',
         dismiss: 'Got it',
         guide: 'How to use',
-        guideHint: 'Paste one Base URL above and any key’s secret into your client. model in the request body is optional.',
+        guideHint: 'Paste one Base URL above and any key’s secret into your client.',
         errorTitle: 'Something failed',
         configPath: 'Config file',
+        search: 'Search models…',
+        selectAll: 'Select all shown',
+        clearAll: 'Clear',
+        reasoning: 'Reasoning',
+        noEfforts: 'upstream declares no effort levels',
+        regionCn: 'CN',
+        regionGlobal: 'Intl',
+        dupSuffix: 'Duplicate suffix',
+        dupSuffixHint: 'An ASCII account name is used as-is; anything else falls back to an ordinal.',
+        accountSafe: 'name is usable as a suffix',
+        accountUnsafe: 'non-ASCII name, will use an ordinal',
       },
     }
-
-    const MODES = ['dsh', 'session', 'current', 'named', 'account', 'first']
-    const EFFORTS = ['', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
     function texts() {
       return (typeof navigator === 'object' && /^zh/i.test(navigator.language ?? '')) ? TEXT.zh : TEXT.en
     }
 
-    /* ── 样式：只用真实注册的 token，配明暗两套回退 ───────────────── */
+    /* ── 样式：只用真实注册的 token ─────────────────────────────────── */
 
     const CSS = `
 .wbg{display:flex;flex-direction:column;gap:20px;padding:2px 0 32px;color:var(--dsw-alias-label-primary,#1a1a1a);font-size:13px;line-height:1.6}
@@ -157,7 +151,6 @@ window.__ModuleLoader__.load({
 .wbg-card{border:1px solid var(--dsw-alias-border-l1,#e3e3e3);border-radius:12px;padding:16px 18px;background:var(--dsw-alias-bg-layer-1,#fff);display:flex;flex-direction:column;gap:12px}
 .wbg-card-soft{background:var(--dsw-alias-bg-layer-2,#f6f6f6);border-style:dashed}
 .wbg-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.wbg-label{min-width:70px;flex:none;color:var(--dsw-alias-label-secondary,#666);font-size:12px}
 .wbg-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;word-break:break-all;line-height:1.5}
 .wbg-btn{appearance:none;border:1px solid var(--dsw-alias-border-l1,#e3e3e3);background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);border-radius:8px;padding:5px 12px;font-size:12px;cursor:pointer;font-family:inherit;line-height:1.5;transition:background .12s,border-color .12s,opacity .12s;white-space:nowrap}
 .wbg-btn:hover:not(:disabled){background:var(--dsw-alias-bg-layer-2,#f2f2f2);border-color:var(--dsw-alias-border-l2,#cfcfcf)}
@@ -170,7 +163,7 @@ window.__ModuleLoader__.load({
 .wbg-btn-sm{padding:3px 9px;font-size:11.5px;border-radius:7px}
 .wbg-input,.wbg-select{appearance:none;border:1px solid var(--dsw-alias-border-l1,#e3e3e3);background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);border-radius:8px;padding:6px 10px;font-size:12.5px;font-family:inherit;max-width:100%;line-height:1.5}
 .wbg-input:focus,.wbg-select:focus{outline:2px solid var(--dsw-alias-brand-primary,#2f6df6);outline-offset:-1px;border-color:transparent}
-.wbg-select{cursor:pointer;padding-right:26px;background-image:linear-gradient(45deg,transparent 50%,var(--dsw-alias-label-tertiary,#999) 50%),linear-gradient(135deg,var(--dsw-alias-label-tertiary,#999) 50%,transparent 50%);background-position:calc(100% - 14px) 52%,calc(100% - 9px) 52%;background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+.wbg-select{cursor:pointer}
 .wbg-hint{color:var(--dsw-alias-label-secondary,#666);font-size:12px;margin:0}
 .wbg-caption{color:var(--dsw-alias-label-tertiary,#8a8a8a);font-size:11.5px;margin:0}
 .wbg-warn{color:var(--dsw-alias-state-warn-primary,#9a6700);font-size:12px;margin:0}
@@ -187,15 +180,25 @@ window.__ModuleLoader__.load({
 .wbg-dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--dsw-alias-state-idle-primary,#b0b0b0)}
 .wbg-dot-on{background:var(--dsw-alias-state-success-primary,#1a7f37);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-success-primary,#1a7f37) 18%,transparent)}
 .wbg-badge{font-size:11px;padding:1.5px 8px;border-radius:999px;border:1px solid var(--dsw-alias-border-l1,#e3e3e3);color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
+.wbg-badge-count{color:var(--dsw-alias-brand-primary,#2f6df6);border-color:currentColor}
 .wbg-secret{display:flex;align-items:center;gap:8px;background:var(--dsw-alias-bg-layer-2,#f6f6f6);border:1px solid var(--dsw-alias-border-l1,#eee);border-radius:8px;padding:8px 11px}
 .wbg-secret code{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary,#666);letter-spacing:.3px}
 .wbg-secret-live code{color:var(--dsw-alias-label-primary,#1a1a1a);letter-spacing:0}
 .wbg-grow{flex:1;min-width:120px}
 .wbg-spacer{flex:1}
-.wbg-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px 18px}
-.wbg-field{display:flex;flex-direction:column;gap:4px;min-width:0}
-.wbg-field > span{color:var(--dsw-alias-label-secondary,#666);font-size:11.5px}
-.wbg-field .wbg-select,.wbg-field .wbg-input{width:100%}
+.wbg-picker{border:1px solid var(--dsw-alias-border-l1,#e3e3e3);border-radius:9px;background:var(--dsw-alias-bg-base,#fff);max-height:320px;overflow-y:auto;display:flex;flex-direction:column}
+.wbg-picker-head{position:sticky;top:0;z-index:1;display:flex;gap:8px;align-items:center;padding:8px 10px;background:var(--dsw-alias-bg-layer-2,#f6f6f6);border-bottom:1px solid var(--dsw-alias-border-l1,#eee)}
+.wbg-group{border-top:1px solid var(--dsw-alias-border-l1,#eee)}
+.wbg-group:first-child{border-top:none}
+.wbg-group-title{display:flex;align-items:center;gap:8px;padding:7px 10px;font-size:11.5px;font-weight:600;color:var(--dsw-alias-label-secondary,#666);background:var(--dsw-alias-bg-layer-2,#fafafa)}
+.wbg-opt{display:flex;align-items:center;gap:9px;padding:6px 10px 6px 22px;cursor:pointer;border-radius:6px}
+.wbg-opt:hover{background:var(--dsw-alias-bg-layer-2,#f6f6f6)}
+.wbg-opt-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
+.wbg-opt-meta{color:var(--dsw-alias-label-tertiary,#8a8a8a);font-size:11px;white-space:nowrap}
+.wbg-chips{display:flex;flex-wrap:wrap;gap:6px}
+.wbg-chip{display:inline-flex;align-items:center;gap:6px;font-size:11px;padding:2px 8px;border-radius:6px;background:var(--dsw-alias-bg-layer-2,#f2f2f2);border:1px solid var(--dsw-alias-border-l1,#e8e8e8);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.wbg-chip-x{cursor:pointer;color:var(--dsw-alias-label-tertiary,#999);font-weight:700;line-height:1}
+.wbg-chip-x:hover{color:var(--dsw-alias-state-error-primary,#d1242f)}
 .wbg-code{background:var(--dsw-alias-bg-layer-2,#f6f6f6);border:1px solid var(--dsw-alias-border-l1,#eee);border-radius:8px;padding:11px 13px;overflow-x:auto;white-space:pre;margin:0;font-size:11.5px;line-height:1.7}
 .wbg-alert{display:flex;gap:10px;align-items:flex-start;border-radius:10px;padding:11px 13px;font-size:12px;border:1px solid transparent}
 .wbg-alert-error{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#d1242f) 9%,transparent);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#d1242f) 30%,transparent);color:var(--dsw-alias-state-error-primary,#d1242f)}
@@ -206,10 +209,8 @@ window.__ModuleLoader__.load({
 .wbg-modal{background:var(--dsw-alias-bg-overlay,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);border:1px solid var(--dsw-alias-border-l2,#cfcfcf);border-radius:14px;box-shadow:0 18px 48px rgba(0,0,0,.24);width:min(560px,100%);padding:20px 22px;display:flex;flex-direction:column;gap:14px}
 .wbg-modal h3{margin:0;font-size:15px;font-weight:600}
 .wbg-modal-actions{display:flex;justify-content:flex-end;gap:8px}
-.wbg-tag{font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8a8a)}
 @media (max-width:720px){
   .wbg-ep{grid-template-columns:1fr;gap:6px}
-  .wbg-grid{grid-template-columns:1fr}
 }
 `
 
@@ -235,7 +236,6 @@ window.__ModuleLoader__.load({
 
     /* ── 小组件 ─────────────────────────────────────────────────────── */
 
-    /** 复制按钮：只在有真正可用的值时渲染。 */
     function CopyButton({ value, t, small }) {
       const [done, setDone] = useState(false)
       const timer = useRef(undefined)
@@ -246,10 +246,9 @@ window.__ModuleLoader__.load({
           timer.current = setTimeout(() => setDone(false), 1500)
         }
         if (navigator.clipboard?.writeText) {
-          navigator.clipboard.writeText(value).then(finish, () => finish())
+          navigator.clipboard.writeText(value).then(finish, finish)
           return
         }
-        /* 兜底：临时 textarea，用完立刻移除，不留在 DOM 里。 */
         const area = document.createElement('textarea')
         area.value = value
         area.setAttribute('readonly', '')
@@ -269,8 +268,7 @@ window.__ModuleLoader__.load({
       }, done ? t.copied : t.copy)
     }
 
-    /** 一行「可复制的地址」。 */
-    function EndpointRow({ entry, t, primary }) {
+    function EndpointRow({ entry, t }) {
       return h('div', { className: 'wbg-ep' },
         h('div', null,
           h('span', { className: 'wbg-ep-name' }, entry.name),
@@ -282,14 +280,6 @@ window.__ModuleLoader__.load({
       )
     }
 
-    /** 一个表单字段（标签在上、控件在下）。 */
-    function Field({ label, children }) {
-      return h('label', { className: 'wbg-field' },
-        h('span', null, label),
-        children)
-    }
-
-    /** 明文弹窗：只在这个弹窗里给出可复制的明文。 */
     function SecretDialog({ secret, t, onClose, intro }) {
       useEffect(() => {
         const onKey = (event) => { if (event.key === 'Escape') onClose() }
@@ -315,55 +305,160 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * 模型勾选器：按账号分组，组内列出该组可选的模型。
+     *
+     * 分组是刻意的：用户的心智模型是「哪个账号能跑哪个模型」，而不是
+     * 「模型属于哪个 provider」。每组第一行是「默认账号」（`accountId: ''`，
+     * 走宿主通道，账号池/换号都生效）。
+     */
+    function ModelPicker({ available, accounts, selected, onChange, t }) {
+      const [query, setQuery] = useState('')
+
+      /* 勾选键：`accountId\u0000modelId`，与后端 normalizeSelections 一致。 */
+      const keyOf = (accountId, modelId) => `${accountId}\u0000${modelId}`
+      const selectedKeys = useMemo(
+        () => new Set(selected.map((row) => keyOf(row.accountId ?? '', row.modelId))),
+        [selected],
+      )
+
+      const groups = useMemo(() => {
+        const needle = query.trim().toLowerCase()
+        const match = (model) => needle === '' || model.modelId.toLowerCase().includes(needle) || (model.displayName ?? '').toLowerCase().includes(needle)
+        const byAccount = new Map()
+        for (const model of available) {
+          if (!match(model)) continue
+          const accountKey = ''
+          if (!byAccount.has(accountKey)) byAccount.set(accountKey, [])
+          byAccount.get(accountKey).push({ ...model, accountId: '' })
+        }
+        for (const account of accounts) {
+          for (const model of available) {
+            if (!match(model)) continue
+            if (model.region !== account.region) continue
+            if (!byAccount.has(account.id)) byAccount.set(account.id, [])
+            byAccount.get(account.id).push({ ...model, accountId: account.id, accountName: account.name })
+          }
+        }
+        return [...byAccount.entries()]
+          .filter(([, models]) => models.length > 0)
+          .map(([accountId, models]) => ({
+            accountId,
+            accountName: accountId === '' ? null : accounts.find((account) => account.id === accountId)?.name ?? accountId.slice(0, 8),
+            models,
+          }))
+      }, [available, accounts, query])
+
+      const toggle = (accountId, model) => {
+        const key = keyOf(accountId, model.modelId)
+        if (selectedKeys.has(key)) {
+          onChange(selected.filter((row) => keyOf(row.accountId ?? '', row.modelId) !== key))
+          return
+        }
+        onChange([
+          ...selected,
+          {
+            accountId,
+            region: model.region,
+            modelId: model.modelId,
+            displayName: model.displayName,
+            ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
+            ...(model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens }),
+            reasoningEfforts: model.reasoningEfforts ?? [],
+            inputModalities: model.inputModalities ?? ['text'],
+          },
+        ])
+      }
+
+      const selectAllShown = () => {
+        const added = [...selected]
+        const have = new Set(added.map((row) => keyOf(row.accountId ?? '', row.modelId)))
+        for (const group of groups) {
+          for (const model of group.models) {
+            const key = keyOf(group.accountId, model.modelId)
+            if (have.has(key)) continue
+            have.add(key)
+            added.push({
+              accountId: group.accountId,
+              region: model.region,
+              modelId: model.modelId,
+              displayName: model.displayName,
+              ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
+              ...(model.maxTokens === undefined ? {} : { maxTokens: model.maxTokens }),
+              reasoningEfforts: model.reasoningEfforts ?? [],
+              inputModalities: model.inputModalities ?? ['text'],
+            })
+          }
+        }
+        onChange(added)
+      }
+
+      return h('div', { style: { display: 'flex', flexDirection: 'column', gap: 8 } },
+        h('div', { className: 'wbg-row' },
+          h('input', {
+            className: 'wbg-input wbg-grow',
+            placeholder: t.search,
+            value: query,
+            'aria-label': t.search,
+            onChange: (event) => setQuery(event.target.value),
+          }),
+          h('button', { type: 'button', className: 'wbg-btn wbg-btn-sm', onClick: selectAllShown }, t.selectAll),
+          h('button', { type: 'button', className: 'wbg-btn wbg-btn-sm', onClick: () => onChange([]) }, t.clearAll),
+        ),
+        h('div', { className: 'wbg-picker' },
+          groups.length === 0
+            ? h('p', { className: 'wbg-hint', style: { padding: 12 } }, t.noneSelected)
+            : groups.map((group) => h('div', { key: group.accountId === '' ? '__default' : group.accountId, className: 'wbg-group' },
+              h('div', { className: 'wbg-group-title' },
+                h('span', null, group.accountId === '' ? t.groupDefault : group.accountName),
+                group.accountId === '' ? null : h('span', { className: 'wbg-badge' },
+                  accounts.find((account) => account.id === group.accountId)?.region === 'global' ? t.regionGlobal : t.regionCn),
+                h('span', { className: 'wbg-spacer' }),
+                h('span', { style: { fontWeight: 400 } }, `${group.models.filter((model) => selectedKeys.has(keyOf(group.accountId, model.modelId))).length}/${group.models.length}`),
+              ),
+              group.models.map((model) => {
+                const key = keyOf(group.accountId, model.modelId)
+                const checked = selectedKeys.has(key)
+                const efforts = Array.isArray(model.reasoningEfforts) ? model.reasoningEfforts : []
+                return h('label', { key, className: 'wbg-opt' },
+                  h('input', { type: 'checkbox', checked, onChange: () => toggle(group.accountId, model) }),
+                  h('span', { className: 'wbg-opt-label', title: model.modelId }, model.modelId),
+                  h('span', { className: 'wbg-opt-meta' },
+                    efforts.length === 0 ? '' : `${t.reasoning}: ${efforts.join('/')}`),
+                )
+              }),
+            )),
+        ),
+      )
+    }
+
     /* ── 单把 key ───────────────────────────────────────────────────── */
 
     function KeyCard({ entry, state, t, onSave, onDelete, onRotate, onReveal }) {
       const [label, setLabel] = useState(entry.label)
       const [enabled, setEnabled] = useState(entry.enabled)
-      const [policy, setPolicy] = useState(entry.policy)
+      const [selections, setSelections] = useState(entry.selections ?? [])
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState(undefined)
       const [saved, setSaved] = useState(false)
       const [dialog, setDialog] = useState(undefined)
+      const [open, setOpen] = useState(false)
 
       useEffect(() => {
         setLabel(entry.label)
         setEnabled(entry.enabled)
-        setPolicy(entry.policy)
+        setSelections(entry.selections ?? [])
       }, [entry])
-
-      const modes = state?.policyModes ?? MODES
-      const models = state?.models ?? []
-      const accounts = state?.accounts ?? []
-      const providers = state?.providers ?? []
 
       const dirty = label !== entry.label
         || enabled !== entry.enabled
-        || JSON.stringify(policy) !== JSON.stringify(entry.policy)
-
-      const patchPolicy = (field, value) => {
-        setPolicy((current) => {
-          const next = { ...current, [field]: value }
-          if (field === 'mode') {
-            /* 切模式时清掉无关字段，免得留下一份读起来像还在用的残留。 */
-            if (value !== 'named' && value !== 'account') {
-              delete next.provider
-              delete next.model
-            }
-            if (value !== 'account') {
-              delete next.accountId
-              delete next.region
-            }
-          }
-          return next
-        })
-      }
+        || JSON.stringify(selections) !== JSON.stringify(entry.selections ?? [])
 
       const save = async () => {
         setBusy(true)
         setError(undefined)
         try {
-          await onSave({ id: entry.id, label, enabled, policy })
+          await onSave({ id: entry.id, label, enabled, selections })
           setSaved(true)
           setTimeout(() => setSaved(false), 1600)
         } catch (caught) {
@@ -407,11 +502,8 @@ window.__ModuleLoader__.load({
           .finally(() => setBusy(false))
       }
 
-      const needsModel = (policy.mode === 'named' || policy.mode === 'account') && (policy.model ?? '') === ''
-      const needsAccount = policy.mode === 'account' && (policy.accountId ?? '') === ''
-      const visibleModels = policy.provider === undefined
-        ? models
-        : models.filter((model) => model.provider === policy.provider)
+      const catalog = entry.catalog ?? []
+      const count = (entry.selections ?? []).length
 
       return h('div', { className: 'wbg-item' },
         h('div', { className: 'wbg-item-head' },
@@ -423,103 +515,47 @@ window.__ModuleLoader__.load({
             'aria-label': t.label,
             onChange: (event) => setLabel(event.target.value),
           }),
-          h('span', { className: 'wbg-badge' }, t[`mode_${policy.mode}`] ?? policy.mode),
+          h('span', { className: 'wbg-badge wbg-badge-count' }, `${count} ${t.selected}`),
           h('span', { className: 'wbg-spacer' }),
           h('button', { type: 'button', className: 'wbg-btn wbg-btn-sm', onClick: reveal, disabled: busy }, t.reveal),
           h('button', { type: 'button', className: 'wbg-btn wbg-btn-sm', onClick: rotate, disabled: busy }, t.rotate),
           h('button', { type: 'button', className: 'wbg-btn wbg-btn-sm wbg-btn-danger', onClick: remove, disabled: busy }, t.remove),
         ),
 
-        /*
-         * 掩码是纯文本，**刻意不配复制按钮**：它含 `*` 占位，复制出去进 HTTP 头
-         * 只会得到 401，或者像 U+2026 那样直接让客户端抛 ByteString 错误。
-         */
+        /* 掩码：纯文本，刻意不配复制按钮（见文件头第 2 条）。 */
         h('div', { className: 'wbg-secret' },
           h('code', { className: 'wbg-mono', 'aria-label': 'masked key' }, entry.masked),
           h('span', { className: 'wbg-caption' }, t.secretHidden),
         ),
 
-        h('div', { className: 'wbg-grid' },
-          h(Field, { label: t.policy },
-            h('select', {
-              className: 'wbg-select',
-              value: policy.mode,
-              onChange: (event) => patchPolicy('mode', event.target.value),
-            }, modes.map((mode) => h('option', { key: mode, value: mode }, t[`mode_${mode}`] ?? mode))),
+        count === 0 ? h('p', { className: 'wbg-warn' }, t.noneSelected) : null,
+
+        /* 用户实际会看到的名字（含重名后缀），让他核对而不是自己推算。 */
+        count === 0 ? null : h('div', null,
+          h('p', { className: 'wbg-caption', style: { marginBottom: 6 } }, t.willExpose),
+          h('div', { className: 'wbg-chips' },
+            catalog.slice(0, 24).map((model) => h('span', { key: model.name, className: 'wbg-chip', title: model.modelId },
+              model.name,
+              model.name === model.modelId ? null : h('span', { className: 'wbg-caption' }, `← ${model.modelId}`),
+            )),
+            catalog.length > 24 ? h('span', { className: 'wbg-caption' }, `+${catalog.length - 24}`) : null,
           ),
-
-          h(Field, { label: t.effort },
-            h('select', {
-              className: 'wbg-select',
-              value: policy.reasoningEffort ?? '',
-              onChange: (event) => patchPolicy('reasoningEffort', event.target.value === '' ? undefined : event.target.value),
-            }, EFFORTS.map((effort) => h('option', { key: effort, value: effort }, effort === '' ? t.effort_auto : effort))),
-          ),
-
-          (policy.mode === 'named' || policy.mode === 'account')
-            ? h(Field, { label: t.provider },
-              h('select', {
-                className: 'wbg-select',
-                value: policy.provider ?? '',
-                onChange: (event) => patchPolicy('provider', event.target.value === '' ? undefined : event.target.value),
-              },
-                h('option', { value: '' }, t.none),
-                providers.map((provider) => h('option', { key: provider.id, value: provider.id }, provider.label)),
-              ))
-            : null,
-
-          policy.mode === 'account'
-            ? h(Field, { label: t.account },
-              h('select', {
-                className: 'wbg-select',
-                value: policy.accountId ?? '',
-                onChange: (event) => {
-                  const accountId = event.target.value
-                  const found = accounts.find((account) => account.id === accountId)
-                  setPolicy((current) => ({
-                    ...current,
-                    accountId,
-                    ...(found === undefined ? {} : { region: found.region }),
-                  }))
-                },
-              },
-                h('option', { value: '' }, t.selectAccount),
-                accounts.map((account) => h('option', { key: `${account.region}:${account.id}`, value: account.id },
-                  `${account.name || account.id.slice(0, 8)} · ${account.region === 'global' ? '国际版' : '国内版'}`)),
-              ))
-            : null,
-
-          (policy.mode === 'named' || policy.mode === 'account')
-            ? h(Field, { label: t.model },
-              h('select', {
-                className: 'wbg-select',
-                value: policy.model ?? '',
-                onChange: (event) => {
-                  const model = event.target.value
-                  const found = models.find((row) => row.id === model)
-                  setPolicy((current) => ({
-                    ...current,
-                    model,
-                    ...(found === undefined ? {} : { provider: found.provider }),
-                  }))
-                },
-              },
-                h('option', { value: '' }, t.selectModel),
-                visibleModels.map((model) => h('option', { key: `${model.provider}:${model.id}`, value: model.id },
-                  `${model.name}${model.region === undefined ? '' : ` · ${model.region}`}`)),
-              ))
-            : null,
         ),
 
-        policy.mode === 'dsh' && state?.defaults?.dsh
-          ? h('p', { className: 'wbg-caption' }, `${t.currentDsh}: ${state.defaults.dsh.provider} / ${state.defaults.dsh.model}`)
-          : null,
-        policy.mode === 'session' && state?.defaults?.session
-          ? h('p', { className: 'wbg-caption' }, `${t.currentSession}: ${state.defaults.session.provider} / ${state.defaults.session.model}`)
-          : null,
+        h('div', { className: 'wbg-row' },
+          h('button', { type: 'button', className: 'wbg-btn wbg-btn-sm', onClick: () => setOpen(!open) },
+            `${t.models} (${count})`),
+          h('span', { className: 'wbg-spacer' }),
+        ),
 
-        needsModel ? h('p', { className: 'wbg-warn' }, t.needsModel) : null,
-        needsAccount ? h('p', { className: 'wbg-warn' }, t.needsAccount) : null,
+        open ? h(ModelPicker, {
+          available: state?.available ?? [],
+          accounts: state?.accounts ?? [],
+          selected: selections,
+          onChange: setSelections,
+          t,
+        }) : null,
+
         error === undefined ? null : h('div', { className: 'wbg-alert wbg-alert-error' },
           h('span', { className: 'wbg-alert-icon', 'aria-hidden': true }, '!'),
           h('span', { className: 'wbg-alert-body' }, error)),
@@ -576,7 +612,7 @@ window.__ModuleLoader__.load({
         setBusy(true)
         setError(undefined)
         try {
-          const body = await adminPost('/keys', { label: '', policy: { mode: 'dsh' } })
+          const body = await adminPost('/keys', { label: '', selections: [] })
           await reload()
           if (body?.created?.secret !== undefined) setCreated(body.created.secret)
         } catch (caught) {
@@ -616,12 +652,11 @@ window.__ModuleLoader__.load({
       }
 
       const endpoints = state.endpoints ?? []
-
       const curlExample = [
         `curl ${endpoints[0]?.requestUrl ?? `${state.baseUrl}/v1/chat/completions`} \\`,
         '  -H "Authorization: Bearer <key secret>" \\',
         '  -H "Content-Type: application/json" \\',
-        `  -d '{"messages":[{"role":"user","content":"hi"}]}'`,
+        `  -d '{"model":"<model from the list>","messages":[{"role":"user","content":"hi"}]}'`,
       ].join('\n')
 
       return h('div', { className: 'wbg' },
@@ -632,7 +667,6 @@ window.__ModuleLoader__.load({
           h('p', { className: 'wbg-sub' }, t.subtitle),
         ),
 
-        /* 四种协议的准确地址：每行一个成品，点一下就复制。 */
         h('div', { className: 'wbg-card' },
           h('div', { className: 'wbg-row' },
             h('strong', { className: 'wbg-sec-title' }, t.endpoints),
@@ -640,8 +674,7 @@ window.__ModuleLoader__.load({
             h('span', { className: 'wbg-caption' }, t.endpointsHint),
           ),
           h('div', null, endpoints.map((entry) => h(EndpointRow, { key: entry.id, entry, t }))),
-          h('p', { className: 'wbg-caption', style: { marginTop: 2 } },
-            `${t.root}: ${state.baseUrl}`),
+          h('p', { className: 'wbg-caption', style: { marginTop: 2 } }, `${t.root}: ${state.baseUrl}`),
         ),
 
         h('div', { className: 'wbg-row' },

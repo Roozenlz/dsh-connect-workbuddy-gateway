@@ -18,6 +18,20 @@ import { join } from 'node:path'
 const VAULT_DIRNAME = 'workbuddy-vault'
 const REGIONS = ['cn', 'global']
 
+/**
+ * 测试注入点。
+ *
+ * 端到端自测需要一个确定的账号表（真实的取决于本机登录状态，跑不起来也不算
+ * 「测试失败」）。生产路径永远走 vault 目录；只有 `tests/stub-accounts.mjs`
+ * 会调用 {@link stubAccounts} 把它换成内存表。
+ */
+let overrides
+
+/** 仅用于测试：用内存表替换 vault 读取。传 undefined 恢复真实读取。 */
+export function stubAccounts(value) {
+  overrides = value
+}
+
 function dshHome() {
   const configured = process.env.DSH_HOME
   if (typeof configured === 'string' && configured.trim() !== '') return configured.trim()
@@ -36,6 +50,15 @@ export function vaultDir(region) {
  * @returns `[{id, name, enterprise, region, expiresAtMs?, source}]`，按 id 去重
  */
 export function accountsIn(region) {
+  if (overrides !== undefined) {
+    return (overrides[region] ?? []).map((account) => ({
+      id: account.id,
+      region,
+      name: account.name ?? '',
+      enterprise: account.enterprise === true,
+      ...(account.expiresAtMs === undefined ? {} : { expiresAtMs: account.expiresAtMs }),
+    }))
+  }
   const dir = vaultDir(region)
   let files
   try {

@@ -1,11 +1,11 @@
 /**
- * 网关的持久化配置：一组 API key，每把 key 带自己的路由策略。
+ * 网关的持久化配置：一组 API key，每把 key 带一份「勾选了哪些模型」的清单。
  *
  * 数据形状（落盘为 JSON，不含任何 WorkBuddy 凭据）：
  *
  * ```json
  * {
- *   "version": 1,
+ *   "version": 2,
  *   "keys": [
  *     {
  *       "id": "k_xxx",
@@ -13,24 +13,22 @@
  *       "secret": "wbg-...",
  *       "enabled": true,
  *       "createdAt": 1790000000000,
- *       "policy": { "mode": "dsh" }
+ *       "selections": [
+ *         { "accountId": "",  "region": "cn",     "modelId": "deepseek-v4.1-flash" },
+ *         { "accountId": "8cb3…", "region": "global", "modelId": "kimi-k3" }
+ *       ]
  *     }
  *   ]
  * }
  * ```
  *
- * `policy.mode` 的取值与含义：
+ * **没有「策略模式」了。** 早期版本用 `policy.mode`（跟随 DSH / 固定模型 / 固定
+ * 账号…），那是把选择权留给了插件。现在的模型是：**用户直接勾选要暴露哪些
+ * （账号, 模型）组合**，`/v1/models` 就把这份勾选原样返回，请求过来时按名字查表
+ * 得到「用哪个账号跑哪个模型」。选哪个模型是调用方的事，插件只负责照单发货。
  *
- *   `dsh`        跟随 DSH 新会话的默认模型
- *   `session`    跟随最近活跃会话正在用的模型
- *   `current`    先会话、再默认选择（「此刻在用的那个」）
- *   `named`      固定 provider + model（这把 key 专属）
- *   `account`    固定账号（可再固定模型；走直连通道）
- *   `first`      目录第一个
- *
- * **策略不再写进模型名。** 请求体里的 `model` 若为空，就用这把 key 的策略；
- * 调用方仍可显式写模型名覆盖（这是客户端 SDK 的硬要求，无法禁止），但写 `cn/`
- * 之类前缀不再是「配置方式」。
+ * `accountId: ''` 表示「用插件当前的默认账号」（走宿主通道，账号池/换号都生效）；
+ * 非空表示点名那个账号（走直连通道）。
  */
 
 import { randomBytes } from 'node:crypto'
@@ -38,8 +36,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSy
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-export const CONFIG_VERSION = 1
-export const POLICY_MODES = ['dsh', 'session', 'current', 'named', 'account', 'first']
+export const CONFIG_VERSION = 2
 
 /** 数据文件路径。 */
 export function configPath() {
@@ -87,7 +84,7 @@ export function normalizeConfig(value) {
   return { version: CONFIG_VERSION, keys }
 }
 
-/** 规整一把 key。`secret` 缺失或过短的条目直接丢弃（不能用的 key 不该留在表里）。 */
+/** 规整一把 key。`secret` 缺失的条目直接丢弃（不能用的 key 不该留在表里）。 */
 function normalizeKey(entry) {
   if (entry === null || typeof entry !== 'object') return undefined
   const secret = typeof entry.secret === 'string' ? entry.secret.trim() : ''
@@ -99,24 +96,44 @@ function normalizeKey(entry) {
     enabled: entry.enabled !== false,
     createdAt: typeof entry.createdAt === 'number' ? entry.createdAt : Date.now(),
     ...(typeof entry.lastUsedAt === 'number' ? { lastUsedAt: entry.lastUsedAt } : {}),
-    policy: normalizePolicy(entry.policy),
+    /* `seeded` 记录「已经自动补过模型勾选」，见 index.js 的 ensureSeeded。 */
+    ...(entry.seeded === true ? { seeded: true } : {}),
+    selections: normalizeSelections(entry.selections),
   }
 }
 
-/** 规整一份策略。 */
-export function normalizePolicy(policy) {
-  const mode = POLICY_MODES.includes(policy?.mode) ? policy.mode : 'dsh'
-  const out = { mode }
-  if (mode === 'named' || mode === 'account') {
-    if (typeof policy?.provider === 'string' && policy.provider !== '') out.provider = policy.provider
-    if (typeof policy?.model === 'string' && policy.model !== '') out.model = policy.model
-  }
-  if (mode === 'account') {
-    out.accountId = typeof policy.accountId === 'string' ? policy.accountId : ''
-    if (typeof policy.region === 'string' && policy.region !== '') out.region = policy.region
-  }
-  if (typeof policy?.reasoningEffort === 'string' && policy.reasoningEffort !== '') {
-    out.reasoningEffort = policy.reasoningEffort
+/**
+ * 规整勾选清单。
+ *
+ * 去重是必须的：同一个 (账号, 模型) 勾两次会让模型列表出现两行同名项，
+ * 客户端选哪一个最后都是同一次调用——那是骗人的，所以在落盘时就消掉。
+ */
+export function normalizeSelections(value) {
+  const out = []
+  const seen = new Set()
+  for (const raw of Array.isArray(value) ? value : []) {
+    if (raw === null || typeof raw !== 'object') continue
+    const modelId = typeof raw.modelId === 'string' ? raw.modelId.trim() : ''
+    if (modelId === '') continue
+    const accountId = typeof raw.accountId === 'string' ? raw.accountId.trim() : ''
+    const region = raw.region === 'global' ? 'global' : raw.region === 'cn' ? 'cn' : undefined
+    const key = `${accountId}\u0000${modelId}`
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push({
+      accountId,
+      ...(region === undefined ? {} : { region }),
+      modelId,
+      ...(typeof raw.displayName === 'string' && raw.displayName !== '' ? { displayName: raw.displayName.slice(0, 120) } : {}),
+      ...(typeof raw.contextWindow === 'number' && raw.contextWindow > 0 ? { contextWindow: Math.floor(raw.contextWindow) } : {}),
+      ...(typeof raw.maxTokens === 'number' && raw.maxTokens > 0 ? { maxTokens: Math.floor(raw.maxTokens) } : {}),
+      ...(Array.isArray(raw.reasoningEfforts)
+        ? { reasoningEfforts: raw.reasoningEfforts.filter((effort) => typeof effort === 'string' && effort !== '').slice(0, 12) }
+        : {}),
+      ...(Array.isArray(raw.inputModalities)
+        ? { inputModalities: raw.inputModalities.filter((mode) => mode === 'text' || mode === 'image') }
+        : {}),
+    })
   }
   return out
 }
@@ -156,7 +173,7 @@ export function makeKey(overrides = {}) {
     secret: newSecret(),
     enabled: true,
     createdAt: Date.now(),
-    policy: { mode: 'dsh' },
+    selections: [],
     ...overrides,
   })
 }
@@ -168,8 +185,8 @@ export function makeKey(overrides = {}) {
  *
  *   - **不用 `…`（U+2026）**。它是多字节字符，客户端把它当 HTTP 头发出去会直接
  *     抛 `Cannot convert argument to a ByteString because the character at index N
- *     has a value of 8230`。用户从这个界面复制到的任何东西都必须是可安全放进
- *     header 的纯 ASCII。
+ *     has a value of 8232/8230`。用户从这个界面复制到的任何东西都必须是可安全
+ *     放进 header 的纯 ASCII。
  *   - **不用 `·` / `•`** 同理。
  *   - 前后各留 4 位，够用户在人眼层面认出「这是哪一把」，但不足以还原。
  *

@@ -14,7 +14,7 @@ import { collect, openAiFinishReason } from './stream.js'
 import { resolve } from './targets.js'
 import { callModel } from './call.js'
 import { withStatus } from './backend.js'
-import { abortSignalOf, flattenOpenAiContent, openAiUsage, splitImageUrl } from './openai-chat.js'
+import { abortSignalOf, flattenOpenAiContent, splitImageUrl } from './openai-chat.js'
 
 /** 解析 Responses 请求体。 */
 export function parseResponsesRequest(body) {
@@ -109,7 +109,7 @@ function responsesContentParts(content) {
 export async function handleResponses(req, res, env) {
   const body = await readJson(req)
   const request = parseResponsesRequest(body)
-  const target = await resolve(env.ctx, env.config, env.providers(), env.key, request.model)
+  const target = resolve(env.providers(), env.key, request.model, env.config)
   const modelName = request.model === '' ? target.model : request.model
   const signal = abortSignalOf(res, req)
   const id = `resp_${randomId()}`
@@ -272,7 +272,7 @@ export async function handleResponses(req, res, env) {
             model: modelName,
             status: 'completed',
             output,
-            ...(usage === undefined ? {} : { usage: openAiUsage(usage) }),
+            usage: responsesUsage(usage),
             ...(sawToolCalls ? {} : {}),
           },
         })
@@ -294,6 +294,28 @@ export async function handleResponses(req, res, env) {
     })
   } finally {
     sse.end()
+  }
+}
+
+/**
+ * 内部 usage → Responses API 的 usage。
+ *
+ * **这个形状与 Chat Completions 不同，不能复用 `openAiUsage`。** Responses 用
+ * `input_tokens` / `output_tokens`，Chat 用 `prompt_tokens` / `completion_tokens`。
+ * Codex 的 `ResponseCompleted` 是强类型结构体，`input_tokens` 是必填字段；给出
+ * `prompt_tokens` 会让它报 `missing field 'input_tokens'` 并触发无限重连。
+ *
+ * 上游没报 usage 时**也要给零值**，不能省略整个字段——省略同样等于缺字段。
+ */
+function responsesUsage(usage) {
+  const input = usage?.inputTokens ?? 0
+  const output = usage?.outputTokens ?? 0
+  return {
+    input_tokens: input,
+    input_tokens_details: { cached_tokens: usage?.cacheReadTokens ?? 0 },
+    output_tokens: output,
+    output_tokens_details: { reasoning_tokens: usage?.reasoningTokens ?? 0 },
+    total_tokens: usage?.totalTokens ?? input + output,
   }
 }
 
@@ -328,7 +350,7 @@ function responsesObject({ id, created, modelName, result, status }) {
     model: modelName,
     status,
     output,
-    ...(result.usage === undefined ? {} : { usage: openAiUsage(result.usage) }),
+    usage: responsesUsage(result.usage),
     ...(result.toolCalls.length === 0 ? {} : { finish_reason: openAiFinishReason(result.finish, true) }),
   }
 }

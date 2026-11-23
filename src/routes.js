@@ -19,8 +19,9 @@ import { handleChat } from './openai-chat.js'
 import { handleResponses } from './openai-responses.js'
 import { handleMessages } from './anthropic.js'
 import { handleGenerate, parseGeminiPath, geminiCatalog } from './gemini.js'
-import { collectModels, directModelsByRegion, openAiCatalog, narrowToPolicy } from './models.js'
-import { readConfig, writeConfig, makeKey, normalizePolicy, normalizeConfig, newSecret, maskSecret, POLICY_MODES } from './config.js'
+import { collectModels, directModelsByRegion, openAiCatalog, anthropicCatalog, catalogForSettings } from './models.js'
+import { readConfig, writeConfig, makeKey, normalizeSelections, normalizeConfig, newSecret, maskSecret } from './config.js'
+import { buildCatalog, safeSuffixOf } from './catalog.js'
 import { allAccounts } from './accounts.js'
 import { regionOfProvider, providerOfRegion } from './resolve.js'
 import { describeEndpoints, stripApiPrefix } from './endpoints.js'
@@ -81,7 +82,7 @@ async function dispatchApi(req, res, ctx, env) {
    */
   const route = stripApiPrefix(path)
   /*
-   * 模型列表现在有两个语义相同的入口，但**响应体形状必须按客户端来**：
+   * 模型列表有两个语义相同的入口，但**响应体形状必须按客户端来**：
    * Anthropic SDK 请求 `/v1/models` 时期待 `{data:[{type,id,display_name,…}]}`，
    * 给它 OpenAI 的 `{object:'list',data:[…]}` 会被判成"响应格式不兼容"。
    *
@@ -96,43 +97,37 @@ async function dispatchApi(req, res, ctx, env) {
         ok: true,
         root: info.root,
         endpoints: info.endpoints.map((entry) => ({ id: entry.id, name: entry.name, baseUrl: entry.baseUrl })),
-        key: { id: keyEntry.id, label: keyEntry.label, policy: keyEntry.policy },
+        key: { id: keyEntry.id, label: keyEntry.label, models: keyCatalog(keyEntry, env).map((entry) => entry.name) },
         protocols: info.endpoints.map((entry) => entry.id),
       })
       return
     }
     if (method === 'GET' && route === '/models') {
       /*
-       * 目录按这把 key 的策略收窄：钉死模型的 key 只列出那一个模型。
-       * 否则客户端会让用户从 9 个里挑，而挑哪个最后都走同一个模型。
+       * 只返回这把 key 勾选的模型 —— 用户的勾选就是唯一的事实来源。
+       * 重名项的名字已经带上账号后缀（见 src/catalog.js）。
+       *
+       * 先补一次选：客户端常常比设置页更早被打开，那时默认 key 还没勾过任何
+       * 模型，列表会是空的 —— 对用户来说就是「网关没起来」。
        */
-      const entries = narrowToPolicy(keyEntry, await catalogEntries(env)) ?? await catalogEntries(env)
-      if (wantsAnthropicShape) {
-        sendJson(res, 200, anthropicCatalog(entries))
-        return
-      }
-      sendJson(res, 200, openAiCatalog(entries, { images: env.config.images !== false }))
+      await env.ensureSeeded?.()
+      const fresh = authenticate(req.headers, url) ?? keyEntry
+      const catalog = keyCatalog(fresh, env)
+      sendJson(res, 200, wantsAnthropicShape ? anthropicCatalog(catalog) : openAiCatalog(catalog))
       return
     }
     if (method === 'GET' && route === '/accounts') {
-      sendJson(res, 200, {
-        accounts: allAccounts(env.config.enableGlobal === false ? ['cn'] : ['cn', 'global']).map((account) => ({
-          region: account.region,
-          id: account.id,
-          name: account.name,
-          enterprise: account.enterprise,
-          ...(account.expiresAtMs === undefined ? {} : { expiresAtMs: account.expiresAtMs }),
-        })),
-      })
+      sendJson(res, 200, { accounts: publicAccounts(env) })
       return
     }
     if (method === 'GET' && (route === '/v1beta/models' || route === '/models/gemini')) {
-      const entries = narrowToPolicy(keyEntry, await catalogEntries(env)) ?? await catalogEntries(env)
-      sendJson(res, 200, geminiCatalog(entries.map((entry) => ({
-        id: entry.id,
-        name: entry.name,
+      const catalog = keyCatalog(keyEntry, env)
+      sendJson(res, 200, geminiCatalog(catalog.map((entry) => ({
+        id: entry.name,
+        name: entry.displayName === '' ? entry.name : entry.displayName,
         contextWindow: entry.contextWindow,
         maxTokens: entry.maxTokens,
+        reasoningEfforts: entry.reasoningEfforts,
       }))))
       return
     }
@@ -182,7 +177,28 @@ async function dispatchAdmin(req, res, ctx, env) {
   const method = req.method ?? 'GET'
   try {
     if (method === 'GET' && path === '/state') {
+      /* 设置页打开是最可靠的「provider 肯定就绪」时机：顺手补选。 */
+      await env.ensureSeeded?.()
       sendJson(res, 200, await adminState(ctx, env))
+      return
+    }
+    if (method === 'POST' && path === '/state/reseed') {
+      /*
+       * 用户主动要求「把某把 key 填满」时用。清掉 seeded 标记再跑一次，
+       * 于是 ensureSeeded 会认它。
+       */
+      const body = await readJsonBody(req)
+      const config = readConfig()
+      const target = config.keys.find((entry) => entry.id === body?.id)
+      if (target === undefined) {
+        sendJson(res, 404, { error: `no such key: ${String(body?.id)}` })
+        return
+      }
+      delete target.seeded
+      target.selections = []
+      writeConfig(config)
+      await env.ensureSeeded?.()
+      sendJson(res, 200, { keys: publicKeys(readConfig(), env) })
       return
     }
     if (method === 'POST' && path === '/keys') {
@@ -190,11 +206,11 @@ async function dispatchAdmin(req, res, ctx, env) {
       const config = readConfig()
       const entry = makeKey({
         label: typeof body?.label === 'string' ? body.label : '',
-        policy: normalizePolicy(body?.policy ?? { mode: 'dsh' }),
+        selections: body?.selections,
       })
       config.keys.push(entry)
       writeConfig(config)
-      sendJson(res, 200, { keys: publicKeys(config), created: { id: entry.id, secret: entry.secret } })
+      sendJson(res, 200, { keys: publicKeys(config, env), created: { id: entry.id, secret: entry.secret } })
       return
     }
     if (method === 'POST' && path === '/keys/update') {
@@ -207,9 +223,9 @@ async function dispatchAdmin(req, res, ctx, env) {
       }
       if (typeof body.label === 'string') target.label = body.label.slice(0, 80)
       if (typeof body.enabled === 'boolean') target.enabled = body.enabled
-      if (body.policy !== undefined) target.policy = normalizePolicy(body.policy)
+      if (body.selections !== undefined) target.selections = normalizeSelections(body.selections)
       writeConfig(config)
-      sendJson(res, 200, { keys: publicKeys(config) })
+      sendJson(res, 200, { keys: publicKeys(config, env) })
       return
     }
     if (method === 'POST' && path === '/keys/delete') {
@@ -222,7 +238,7 @@ async function dispatchAdmin(req, res, ctx, env) {
         return
       }
       writeConfig(config)
-      sendJson(res, 200, { keys: publicKeys(config) })
+      sendJson(res, 200, { keys: publicKeys(config, env) })
       return
     }
     if (method === 'POST' && path === '/keys/reveal') {
@@ -246,16 +262,19 @@ async function dispatchAdmin(req, res, ctx, env) {
       }
       target.secret = newSecret()
       writeConfig(config)
-      sendJson(res, 200, { keys: publicKeys(config), secret: target.secret })
+      sendJson(res, 200, { keys: publicKeys(config, env), secret: target.secret })
       return
     }
     if (method === 'POST' && path === '/config/reset') {
       const config = readConfig()
       if (config.keys.length === 0) {
-        config.keys.push(makeKey({ label: 'default' }))
+        const entry = makeKey({ label: 'default' })
+        /* 首次建 key 时把所有可见模型都勾上，用户拿到的 key 立刻能用。 */
+        entry.selections = normalizeSelections(await catalogForSettings(env))
+        config.keys.push(entry)
         writeConfig(config)
       }
-      sendJson(res, 200, { keys: publicKeys(config) })
+      sendJson(res, 200, { keys: publicKeys(config, env) })
       return
     }
     sendJson(res, 404, { error: `no such admin route: ${method} ${path}` })
@@ -265,38 +284,32 @@ async function dispatchAdmin(req, res, ctx, env) {
   }
 }
 
-/** 设置页需要的一次性快照：key 表、模型目录、账号、四种协议的准确地址。 */
+/** 设置页需要的一次性快照：可选模型全表、账号、key 表、四种协议的准确地址。 */
 async function adminState(ctx, env) {
   const config = readConfig()
-  const providers = env.providers()
-  const models = await catalogEntries(env)
   const origin = originOf(ctx)
+  const accounts = publicAccounts(env)
+  /* 勾选界面的候选：全量目录 × 每个账号，用户从中挑。 */
+  const available = await catalogForSettings(env, accounts)
   return {
     origin,
-    /* 兼容旧字段：root 就是不带协议后缀的那条基址。 */
     baseUrl: `${origin}${PREFIX}`,
     endpoints: describeEndpoints(origin).endpoints,
     configPath: configPathOf(),
-    policyModes: POLICY_MODES,
-    providers: providers.map((provider) => ({
+    providers: env.providers().map((provider) => ({
       id: provider,
       region: regionOfProvider(provider) ?? null,
       label: regionOfProvider(provider) === 'global' ? 'WorkBuddy 国际版' : 'WorkBuddy 国内版',
     })),
-    models: models.map((entry) => ({
-      id: entry.id,
-      name: entry.name ?? entry.id,
-      provider: entry.provider,
-      region: entry.region ?? null,
-      contextWindow: entry.contextWindow ?? null,
-    })),
-    accounts: allAccounts(env.config.enableGlobal === false ? ['cn'] : ['cn', 'global']).map((account) => ({
+    accounts: accounts.map((account) => ({
       region: account.region,
       id: account.id,
-      name: account.name,
+      name: account.name === '' ? account.id.slice(0, 8) : account.name,
       enterprise: account.enterprise,
+      safeSuffix: account.safeSuffix,
     })),
-    keys: publicKeys(config),
+    available,
+    keys: publicKeys(config, env),
     defaults: {
       dsh: describeSelection(defaultSelectionOf(ctx)),
       session: describeSelection(sessionSelectionOf(ctx)),
@@ -304,15 +317,29 @@ async function adminState(ctx, env) {
   }
 }
 
-/** key 表对外投影：secret 默认打码，只有 reveal / rotate 才回明文。 */
-function publicKeys(config) {
+/**
+ * key 表对外投影：secret 默认打码，只有 reveal / rotate 才回明文。
+ *
+ * 同时给出 `catalog`：这把 key 实际会暴露给客户端的模型名（含重名后缀）。
+ * 设置页据此显示「用户会看到哪些名字」，用户不必自己推算后缀规则。
+ */
+function publicKeys(config, env) {
+  const accounts = env === undefined ? [] : publicAccounts(env)
   return config.keys.map((entry) => ({
     id: entry.id,
     label: entry.label,
     masked: maskSecret(entry.secret),
     enabled: entry.enabled,
     createdAt: entry.createdAt,
-    policy: entry.policy,
+    selections: entry.selections,
+    catalog: buildCatalog(entry.selections ?? [], accounts).map((model) => ({
+      name: model.name,
+      modelId: model.modelId,
+      displayName: model.displayName,
+      region: model.region ?? null,
+      accountId: model.accountId,
+      reasoningEfforts: model.reasoningEfforts,
+    })),
   }))
 }
 
@@ -382,31 +409,22 @@ function isLoopbackAddress(value) {
 
 /* ── 杂项 ─────────────────────────────────────────────────────────────── */
 
-/**
- * Anthropic 形状的模型列表。
- *
- * Anthropic SDK 读的是 `{ data: [{ type, id, display_name, created_at }] }`；
- * 给它 OpenAI 的 `object: 'list'` 会被判成格式不兼容。上下文与输出上限放在
- * 标准字段之外并列给出，认识它们的客户端能用上，不认识的会忽略。
- */
-function anthropicCatalog(entries) {
-  return {
-    data: entries.map((entry) => {
-      const contextWindow = typeof entry.contextWindow === 'number' && entry.contextWindow > 0 ? entry.contextWindow : undefined
-      const maxTokens = typeof entry.maxTokens === 'number' && entry.maxTokens > 0 ? entry.maxTokens : undefined
-      return {
-        type: 'model',
-        id: entry.id,
-        display_name: entry.name ?? entry.id,
-        created_at: new Date(0).toISOString(),
-        ...(contextWindow === undefined ? {} : { context_window: contextWindow, max_input_tokens: contextWindow }),
-        ...(maxTokens === undefined ? {} : { max_output_tokens: maxTokens }),
-      }
-    }),
-    has_more: false,
-    first_id: entries.length === 0 ? null : entries[0].id,
-    last_id: entries.length === 0 ? null : entries[entries.length - 1].id,
-  }
+/** 某个 key 的模型清单（勾选 → 客户端看到的模型）。 */
+function keyCatalog(keyEntry, env) {
+  return buildCatalog(keyEntry.selections ?? [], publicAccounts(env))
+}
+
+/** 本机账号表（不含 token），供清单解析与设置页共用。 */
+function publicAccounts(env) {
+  const regions = env.config.enableGlobal === false ? ['cn'] : ['cn', 'global']
+  return allAccounts(regions).map((account) => ({
+    region: account.region,
+    id: account.id,
+    name: account.name,
+    enterprise: account.enterprise,
+    safeSuffix: safeSuffixOf(account.name) ?? null,
+    ...(account.expiresAtMs === undefined ? {} : { expiresAtMs: account.expiresAtMs }),
+  }))
 }
 
 async function catalogEntries(env) {

@@ -151,7 +151,7 @@ export async function handleGenerate(req, res, env, parsed) {
    * 「不指定」写法。
    */
   const requested = parsed.model === '-' ? '' : parsed.model
-  const target = await resolve(env.ctx, env.config, env.providers(), env.key, requested)
+  const target = resolve(env.providers(), env.key, requested, env.config)
   const modelName = requested === '' ? target.model : requested
   const signal = abortSignalOf(res, req)
   const stream = parsed.action === 'streamGenerateContent'

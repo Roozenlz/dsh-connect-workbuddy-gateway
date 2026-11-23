@@ -1,24 +1,19 @@
 /**
  * 把一条请求翻译成一次真实调用。
  *
- * 策略来源只有一处：**请求所用 API key 的 `policy`**。模型名不再承载配置——
- * 调用方在请求体里写的 `model` 只被当作「这次想用哪个模型」，不是配置方式。
+ * **这里没有「策略」了。** 唯一的信息来源是：这个 key 勾选了哪些 `(账号, 模型)`
+ * 组合，以及客户端这次请求了清单里的哪个名字。
  *
- * 解析顺序（从强到弱）：
+ * 解析顺序：
+ *   1. 请求里的 `model` 命中清单 → 用那一条（含它的账号与区域）；
+ *   2. 没命中但清单里只有一项 → 用那一项（客户端没填 model 时很常见）；
+ *   3. 都没有 → 报错，并明确告诉调用方这把 key 能选什么。
  *
- *   1. 请求体显式给了模型 → 就用它（客户端 SDK 的硬要求，无法禁止）；
- *      所在 provider 由这把 key 的策略或目录归属决定。
- *   2. 策略是 `named` / `account` → 用策略里钉的 provider / model / 账号。
- *   3. 其它策略（`dsh` / `session` / `current` / `first`）→ 现读对应来源。
- *
- * 无论走哪条，最终都落成 `{provider?, region?, accountId?, model, reasoningEffort?}`：
- * 有 `accountId` 就必须走直连通道，否则走宿主 adapter。
+ * 账号为 `''` 的条目走宿主通道（插件自己的账号选择与账号池生效）；
+ * 非空则走直连通道，点名那个账号。
  */
 
-import { defaultSelection, sessionSelection } from './selections.js'
-import { regionOfAccount } from './accounts.js'
-
-const KNOWN_EFFORTS = new Set(['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+import { buildCatalog, lookupModel } from './catalog.js'
 
 /** provider 路由 → 区域。 */
 export function regionOfProvider(provider) {
@@ -38,164 +33,52 @@ export function providerOfRegion(region, providers) {
 /**
  * 解析一次调用。
  *
- * @param ctx 宿主上下文
  * @param providers workbuddy 系 provider 路由
- * @param keyEntry 这条请求所用 API key 的配置（含 policy）
+ * @param keyEntry 这条请求所用 API key 的配置（含 `selections`）
+ * @param accounts 本机账号表（取昵称与区域）
  * @param requestedModel 请求体里的 model（可能为空）
- * @param config 插件级配置（`enableGlobal` 等）
- * @param listModels 目录读取函数 `(ctx, provider) => Promise<LlmModelInfo[]>`
- * @returns `{provider?, region?, accountId?, model, reasoningEffort?, displayModel}`
+ * @returns `{provider?, region?, accountId?, model, displayName}`
  */
-export async function resolveTarget(ctx, providers, keyEntry, requestedModel, config, listModels) {
-  const policy = keyEntry?.policy ?? { mode: 'dsh' }
-  const requested = typeof requestedModel === 'string' ? requestedModel.trim() : ''
-
-  /*
-   * 账号策略优先于一切：它决定了「谁付钱」，而模型可以另说。
-   * 没给区域时按本机账号名册反查——绝不猜，也绝不两个区都试（那会拿别人的额度）。
-   */
-  if (policy.mode === 'account') {
-    const accountId = typeof policy.accountId === 'string' ? policy.accountId.trim() : ''
-    if (accountId === '') {
-      throw badRequest('this API key is set to pin an account, but no account is chosen yet; pick one in Settings → WorkBuddy Gateway', 'account_not_configured')
-    }
-    const regions = config?.enableGlobal === false ? ['cn'] : ['cn', 'global']
-    const region = policy.region ?? regionOfAccount(accountId, regions)
-    if (region === undefined) {
-      throw badRequest(`the account "${accountId}" pinned by this API key is not signed in on this machine`, 'account_not_found')
-    }
-    const model = requested !== '' ? requested : policy.model
-    if (model === undefined || model === '') {
-      throw badRequest('this API key pins an account but names no model; set one in Settings → WorkBuddy Gateway or send model in the request', 'model_not_configured')
-    }
-    return {
-      region,
-      accountId,
-      provider: providerOfRegion(region, providers),
-      model,
-      reasoningEffort: effortOf(policy),
-      displayModel: model,
-    }
-  }
-
-  /* 请求显式给了模型：尊重它，只在目录里确认归属。 */
-  if (requested !== '') {
-    const provider = await providerOwning(ctx, providers, requested, policy, listModels)
-    return {
-      region: regionOfProvider(provider),
-      provider,
-      model: requested,
-      reasoningEffort: effortOf(policy),
-      displayModel: requested,
-    }
-  }
-
-  /* 请求没给模型：完全由策略决定。 */
-  if (policy.mode === 'named') {
-    const model = typeof policy.model === 'string' ? policy.model.trim() : ''
-    if (model === '') {
-      throw badRequest('this API key is set to a fixed model, but none is chosen yet; pick one in Settings → WorkBuddy Gateway', 'model_not_configured')
-    }
-    const provider = await providerOwning(ctx, providers, model, policy, listModels)
-    return {
-      region: regionOfProvider(provider),
-      provider,
-      model,
-      reasoningEffort: effortOf(policy),
-      displayModel: model,
-    }
-  }
-
-  const resolved = await resolveByMode(ctx, providers, policy, config, listModels)
-  if (resolved === undefined) {
-    throw badRequest(
-      `this API key follows "${policy.mode}" but that source has no usable model right now; set a fixed model on this key, or pass model in the request`,
+export function resolveTarget(providers, keyEntry, accounts, requestedModel) {
+  const catalog = buildCatalog(keyEntry?.selections ?? [], accounts)
+  if (catalog.length === 0) {
+    throw fail(
+      409,
       'model_not_configured',
+      'this API key has no models selected yet; open Settings → WorkBuddy 模型网关 and tick the models this key should serve',
     )
   }
+
+  const requested = typeof requestedModel === 'string' ? requestedModel.trim() : ''
+  const hit = requested === '' ? (catalog.length === 1 ? catalog[0] : undefined) : lookupModel(catalog, requested)
+  if (hit === undefined) {
+    const available = catalog.map((entry) => entry.name)
+    throw fail(
+      404,
+      'model_not_found',
+      requested === ''
+        ? `this API key serves ${String(available.length)} models, so the request must name one: ${available.join(', ')}`
+        : `this API key does not serve "${requested}"; it serves: ${available.join(', ')}`,
+    )
+  }
+
+  const region = hit.region ?? 'cn'
+  const provider = hit.accountId === '' ? providerOfRegion(region, providers) : providerOfRegion(region, providers)
   return {
-    region: regionOfProvider(resolved.provider),
-    provider: resolved.provider,
-    model: resolved.model,
-    reasoningEffort: effortOf(policy) ?? resolved.reasoningEffort,
-    displayModel: resolved.model,
+    /* 点名账号时必须知道自己属于哪个区；区域已经在勾选时记下了。 */
+    region,
+    accountId: hit.accountId === '' ? undefined : hit.accountId,
+    provider,
+    /* 发给上游的真实模型 id（不带我们加的后缀）。 */
+    model: hit.modelId,
+    /* 回给客户端时用它请求的那个名字，保持对话一致性。 */
+    displayModel: requested === '' ? hit.name : requested,
   }
 }
 
-/** 按模式现读一个 `{provider, model}`。 */
-async function resolveByMode(ctx, providers, policy, config, listModels) {
-  const usable = (selection) => selection !== undefined && providers.includes(selection.provider)
-
-  if (policy.mode === 'session') {
-    const selection = sessionSelection(ctx)
-    if (usable(selection)) return selection
-  }
-  if (policy.mode === 'current') {
-    const live = sessionSelection(ctx)
-    if (usable(live)) return live
-    const preferred = defaultSelection(ctx)
-    if (usable(preferred)) return preferred
-  }
-  if (policy.mode === 'dsh') {
-    const selection = defaultSelection(ctx)
-    if (usable(selection)) return selection
-  }
-  if (policy.mode === 'first') {
-    for (const provider of providers) {
-      const models = await listModels(ctx, provider)
-      if (models.length > 0) return { provider, model: models[0].id }
-    }
-    return undefined
-  }
-  /*
-   * 指定的来源读不到（例如没有活跃会话）时，退到 DSH 默认选择。
-   * 这是 `dsh` 之外的三种模式共同的兜底：宁可给一个用户设过的默认，
-   * 也不要因为「此刻没有会话」就报错。
-   */
-  if (policy.mode !== 'dsh') {
-    const selection = defaultSelection(ctx)
-    if (usable(selection)) return selection
-    for (const provider of providers) {
-      const models = await listModels(ctx, provider)
-      if (models.length > 0) return { provider, model: models[0].id }
-    }
-  }
-  return undefined
-}
-
-/**
- * 一个模型 id 该由哪个 provider 提供。
- *
- * 顺序：策略里钉的 provider（若模型属于它）→ 目录里第一个含这个 id 的 provider
- * → 策略的 provider → 第一个 provider。最后两项保证「用户写了个目录里没有的
- * 模型」时请求仍会发出去，由上游给出准确答复（UNKNOWN_MODEL），而不是在这里
- * 编一个 404。
- */
-async function providerOwning(ctx, providers, model, policy, listModels) {
-  const pinned = typeof policy?.provider === 'string' && providers.includes(policy.provider) ? policy.provider : undefined
-  if (pinned !== undefined) {
-    const models = await listModels(ctx, pinned)
-    if (models.some((entry) => entry.id === model)) return pinned
-  }
-  for (const provider of providers) {
-    const models = await listModels(ctx, provider)
-    if (models.some((entry) => entry.id === model)) return provider
-  }
-  if (pinned !== undefined) return pinned
-  if (providers.length > 0) return providers[0]
-  throw badRequest('no workbuddy provider is registered; is dsh-connect-workbuddy installed and enabled?', 'no_provider')
-}
-
-function effortOf(policy) {
-  const effort = policy?.reasoningEffort
-  return typeof effort === 'string' && KNOWN_EFFORTS.has(effort) ? effort : undefined
-}
-
-function badRequest(message, code) {
+function fail(status, code, message) {
   const error = new Error(message)
-  error.status = code === 'model_not_configured' || code === 'account_not_configured' ? 409 : 404
+  error.status = status
   error.code = code
   return error
 }
-
-export { KNOWN_EFFORTS }
