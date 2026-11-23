@@ -1,12 +1,20 @@
 /**
- * 设置 → WorkBuddy Gateway 页面（Client 半）。
+ * 设置 → WorkBuddy 模型网关（Client 半）。
  *
- * 这是插件的配置界面：一个 API key 列表，每把 key 自带路由策略。策略从模型名里
- * 搬到这里，就是为了这件事——用户在界面上点几下就能决定「这把 key 用哪个模型」，
- * 而不是去改别人客户端里的模型名。
+ * 设计上有三条硬约束，都是踩出来的：
  *
- * 页面通过 `/plugins/dsh-workbuddy-gateway/*` 管理接口读写自己的配置；那些路由
- * 只接受 loopback，与 DSH 自己的设置页是同一条信任边界。
+ * 1. **主题 token 必须用真实存在的那几个。** DSH 的 Theme 只注册了
+ *    `--dsw-alias-label-primary/secondary/tertiary`、`--dsw-alias-bg-base/layer-1/
+ *    layer-2/overlay`、`--dsw-alias-border-l1/l2`、`--dsw-alias-brand-primary` 与
+ *    几个 `state-*`。写别的名字不会报错，只会**静默回退**，于是界面看起来"没样式"。
+ *
+ * 2. **掩码绝不可复制。** 曾把掩码当普通文本展示并给了复制按钮，用户复制到的
+ *    `wbg-v1-9…VJq0` 里的 `…`（U+2026）放进 HTTP 头会让客户端直接抛
+ *    `Cannot convert argument to a ByteString … value of 8230`。所以：掩码是
+ *    `*` 号、不提供复制；只有明文（reveal 之后）才有复制按钮。
+ *
+ * 3. **地址要给成品。** 每种协议该填什么都算好了，用户点一下复制就行，
+ *    不用自己判断要不要加 `/v1`。
  */
 
 window.__ModuleLoader__.load({
@@ -14,7 +22,7 @@ window.__ModuleLoader__.load({
   factory(require) {
     const React = require('react')
     const h = React.createElement
-    const { useState, useEffect, useCallback } = React
+    const { useState, useEffect, useCallback, useRef } = React
 
     const NS = 'workbuddy-gateway'
     const ADMIN = '/plugins/dsh-workbuddy-gateway'
@@ -25,15 +33,17 @@ window.__ModuleLoader__.load({
       zh: {
         title: 'WorkBuddy 模型网关',
         subtitle: '本机任意应用都能用这些 WorkBuddy 模型。每把 API key 自带路由策略。',
+        endpoints: '接口地址',
+        endpointsHint: '按你用的客户端选一行，复制「Base URL」填进去即可。',
         baseUrl: 'Base URL',
-        configPath: '配置文件',
-        copy: '复制',
-        copied: '已复制',
+        requestUrl: '实际请求',
+        auth: '鉴权头',
+        root: '网关根地址',
         keys: 'API keys',
         addKey: '新建 key',
         noKeys: '还没有 key。点「新建 key」创建第一把。',
-        reveal: '显示',
-        hide: '隐藏',
+        reveal: '显示明文',
+        hide: '收起',
         rotate: '重置',
         remove: '删除',
         label: '名称',
@@ -53,31 +63,39 @@ window.__ModuleLoader__.load({
         save: '保存',
         saved: '已保存',
         enabled: '启用',
-        disabled: '已停用',
         currentDsh: 'DSH 默认',
         currentSession: '活跃会话',
-        none: '未设置',
-        loading: '加载中…',
-        example: '用法',
-        exampleHint: '把 Base URL 与某把 key 的 secret 填进客户端即可；请求体里的 model 可以不写。',
+        none: '不限',
+        loading: '正在读取配置…',
+        copy: '复制',
+        copied: '已复制',
+        secretHidden: '点「显示明文」后才有可复制的内容',
+        secretCopied: '明文只在这个页面显示，刷新后需要重新点开',
         confirmRemove: '删除后这把 key 立即失效，且无法恢复。确定删除？',
         selectModel: '选择模型',
         selectAccount: '选择账号',
-        notConfigured: '还没选',
-        needsModel: '这把 key 选了固定模型策略，请选择模型。',
-        needsAccount: '这把 key 选了固定账号策略，请选择账号。',
+        needsModel: '还没选模型，这把 key 暂时不能用。',
+        needsAccount: '还没选账号，这把 key 暂时不能用。',
+        created: '已创建新 key，明文如下。请立刻复制保存 —— 关掉这个提示后需要重新点「显示明文」。',
+        dismiss: '我知道了',
+        guide: '怎么用',
+        guideHint: '把上面某一行的 Base URL 和任意一把 key 的明文填进客户端；请求体里的 model 可以不写。',
+        errorTitle: '出错了',
+        configPath: '配置文件',
       },
       en: {
         title: 'WorkBuddy Gateway',
         subtitle: 'Any app on this machine can use these WorkBuddy models. Each API key carries its own routing policy.',
+        endpoints: 'Endpoints',
+        endpointsHint: 'Pick the row for your client and copy its Base URL.',
         baseUrl: 'Base URL',
-        configPath: 'Config file',
-        copy: 'Copy',
-        copied: 'Copied',
+        requestUrl: 'Actual request',
+        auth: 'Auth header',
+        root: 'Gateway root',
         keys: 'API keys',
         addKey: 'New key',
-        noKeys: 'No keys yet. Use “New key” to create the first one.',
-        reveal: 'Show',
+        noKeys: 'No keys yet. Use "New key" to create the first one.',
+        reveal: 'Show secret',
         hide: 'Hide',
         rotate: 'Rotate',
         remove: 'Delete',
@@ -98,56 +116,101 @@ window.__ModuleLoader__.load({
         save: 'Save',
         saved: 'Saved',
         enabled: 'Enabled',
-        disabled: 'Disabled',
         currentDsh: 'DSH default',
         currentSession: 'Active session',
-        none: 'not set',
-        loading: 'Loading…',
-        example: 'Usage',
-        exampleHint: 'Put the Base URL and one key’s secret into your client; model in the request body is optional.',
+        none: 'any',
+        loading: 'Reading configuration…',
+        copy: 'Copy',
+        copied: 'Copied',
+        secretHidden: 'Use "Show secret" to get something copyable',
+        secretCopied: 'The secret stays on this page only; reopen it after a refresh',
         confirmRemove: 'The key stops working immediately and cannot be recovered. Delete it?',
         selectModel: 'Select model',
         selectAccount: 'Select account',
-        notConfigured: 'not chosen',
-        needsModel: 'This key uses a fixed model policy; choose a model.',
-        needsAccount: 'This key pins an account; choose one.',
+        needsModel: 'No model chosen yet, so this key cannot be used.',
+        needsAccount: 'No account chosen yet, so this key cannot be used.',
+        created: 'New key created. Copy the secret now — after dismissing this you will need "Show secret" again.',
+        dismiss: 'Got it',
+        guide: 'How to use',
+        guideHint: 'Paste one Base URL above and any key’s secret into your client. model in the request body is optional.',
+        errorTitle: 'Something failed',
+        configPath: 'Config file',
       },
     }
 
     const MODES = ['dsh', 'session', 'current', 'named', 'account', 'first']
     const EFFORTS = ['', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
-    /* ── 样式（只用主题 token，随明暗切换） ─────────────────────────── */
+    function texts() {
+      return (typeof navigator === 'object' && /^zh/i.test(navigator.language ?? '')) ? TEXT.zh : TEXT.en
+    }
+
+    /* ── 样式：只用真实注册的 token，配明暗两套回退 ───────────────── */
 
     const CSS = `
-.wbg-page{display:flex;flex-direction:column;gap:18px;padding:2px 0 28px;color:var(--dsw-alias-text-primary);font-size:13px;line-height:1.55}
-.wbg-head{display:flex;flex-direction:column;gap:4px}
-.wbg-h1{font-size:16px;font-weight:600;margin:0}
-.wbg-sub{color:var(--dsw-alias-text-secondary);margin:0}
-.wbg-card{border:1px solid var(--dsw-alias-border-subtle);border-radius:10px;padding:14px 16px;background:var(--dsw-alias-bg-elevated)}
+.wbg{display:flex;flex-direction:column;gap:20px;padding:2px 0 32px;color:var(--dsw-alias-label-primary,#1a1a1a);font-size:13px;line-height:1.6}
+.wbg *{box-sizing:border-box}
+.wbg-head{display:flex;flex-direction:column;gap:6px}
+.wbg-h1{font-size:17px;font-weight:600;margin:0;letter-spacing:-.01em}
+.wbg-sub{color:var(--dsw-alias-label-secondary,#666);margin:0;font-size:12.5px}
+.wbg-sec-title{font-size:13px;font-weight:600;margin:0}
+.wbg-card{border:1px solid var(--dsw-alias-border-l1,#e3e3e3);border-radius:12px;padding:16px 18px;background:var(--dsw-alias-bg-layer-1,#fff);display:flex;flex-direction:column;gap:12px}
+.wbg-card-soft{background:var(--dsw-alias-bg-layer-2,#f6f6f6);border-style:dashed}
 .wbg-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
-.wbg-row-tight{gap:8px}
-.wbg-label{min-width:76px;color:var(--dsw-alias-text-secondary);flex:none}
-.wbg-mono{font-family:var(--dsw-alias-font-mono,ui-monospace,SFMono-Regular,Menlo,monospace);font-size:12px;word-break:break-all}
-.wbg-btn{appearance:none;border:1px solid var(--dsw-alias-border-subtle);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-text-primary);border-radius:7px;padding:5px 11px;font-size:12px;cursor:pointer;font-family:inherit}
-.wbg-btn:hover{background:var(--dsw-alias-bg-hover,rgba(127,127,127,.12))}
-.wbg-btn:disabled{opacity:.5;cursor:default}
-.wbg-btn-primary{background:var(--dsw-alias-brand-primary,#2f6df6);border-color:transparent;color:#fff}
-.wbg-btn-danger{color:var(--dsw-alias-danger,#e5484d);border-color:var(--dsw-alias-border-subtle)}
-.wbg-input,.wbg-select{appearance:none;border:1px solid var(--dsw-alias-border-subtle);background:var(--dsw-alias-bg-base);color:var(--dsw-alias-text-primary);border-radius:7px;padding:5px 9px;font-size:12px;font-family:inherit;max-width:100%}
-.wbg-input:focus,.wbg-select:focus{outline:2px solid var(--dsw-alias-brand-primary,#2f6df6);outline-offset:-1px}
-.wbg-hint{color:var(--dsw-alias-text-secondary);font-size:12px}
-.wbg-warn{color:var(--dsw-alias-warning,#b26a00);font-size:12px}
-.wbg-list{display:flex;flex-direction:column;gap:10px}
-.wbg-item{border:1px solid var(--dsw-alias-border-subtle);border-radius:9px;padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+.wbg-label{min-width:70px;flex:none;color:var(--dsw-alias-label-secondary,#666);font-size:12px}
+.wbg-mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;word-break:break-all;line-height:1.5}
+.wbg-btn{appearance:none;border:1px solid var(--dsw-alias-border-l1,#e3e3e3);background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);border-radius:8px;padding:5px 12px;font-size:12px;cursor:pointer;font-family:inherit;line-height:1.5;transition:background .12s,border-color .12s,opacity .12s;white-space:nowrap}
+.wbg-btn:hover:not(:disabled){background:var(--dsw-alias-bg-layer-2,#f2f2f2);border-color:var(--dsw-alias-border-l2,#cfcfcf)}
+.wbg-btn:disabled{opacity:.45;cursor:default}
+.wbg-btn:focus-visible{outline:2px solid var(--dsw-alias-brand-primary,#2f6df6);outline-offset:1px}
+.wbg-btn-primary{background:var(--dsw-alias-brand-primary,#2f6df6);border-color:transparent;color:#fff;font-weight:500}
+.wbg-btn-primary:hover:not(:disabled){background:var(--dsw-alias-brand-primary,#2f6df6);filter:brightness(1.08)}
+.wbg-btn-danger{color:var(--dsw-alias-state-error-primary,#d1242f)}
+.wbg-btn-danger:hover:not(:disabled){background:var(--dsw-alias-state-error-primary,#d1242f);border-color:transparent;color:#fff}
+.wbg-btn-sm{padding:3px 9px;font-size:11.5px;border-radius:7px}
+.wbg-input,.wbg-select{appearance:none;border:1px solid var(--dsw-alias-border-l1,#e3e3e3);background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);border-radius:8px;padding:6px 10px;font-size:12.5px;font-family:inherit;max-width:100%;line-height:1.5}
+.wbg-input:focus,.wbg-select:focus{outline:2px solid var(--dsw-alias-brand-primary,#2f6df6);outline-offset:-1px;border-color:transparent}
+.wbg-select{cursor:pointer;padding-right:26px;background-image:linear-gradient(45deg,transparent 50%,var(--dsw-alias-label-tertiary,#999) 50%),linear-gradient(135deg,var(--dsw-alias-label-tertiary,#999) 50%,transparent 50%);background-position:calc(100% - 14px) 52%,calc(100% - 9px) 52%;background-size:5px 5px,5px 5px;background-repeat:no-repeat}
+.wbg-hint{color:var(--dsw-alias-label-secondary,#666);font-size:12px;margin:0}
+.wbg-caption{color:var(--dsw-alias-label-tertiary,#8a8a8a);font-size:11.5px;margin:0}
+.wbg-warn{color:var(--dsw-alias-state-warn-primary,#9a6700);font-size:12px;margin:0}
+.wbg-list{display:flex;flex-direction:column;gap:12px}
+.wbg-ep{display:grid;grid-template-columns:minmax(120px,1fr) minmax(0,2.2fr) auto;align-items:center;gap:12px;padding:10px 0;border-top:1px solid var(--dsw-alias-border-l1,#eee)}
+.wbg-ep:first-of-type{border-top:none;padding-top:2px}
+.wbg-ep-name{font-weight:500;font-size:12.5px}
+.wbg-ep-hint{color:var(--dsw-alias-label-tertiary,#8a8a8a);font-size:11.5px;display:block}
+.wbg-ep-url{min-width:0}
+.wbg-ep-url code{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.wbg-item{border:1px solid var(--dsw-alias-border-l1,#e3e3e3);border-radius:11px;padding:14px 16px;display:flex;flex-direction:column;gap:11px;background:var(--dsw-alias-bg-base,#fff);transition:border-color .12s}
+.wbg-item:hover{border-color:var(--dsw-alias-border-l2,#cfcfcf)}
 .wbg-item-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.wbg-badge{font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid var(--dsw-alias-border-subtle);color:var(--dsw-alias-text-secondary)}
-.wbg-badge-on{color:var(--dsw-alias-success,#127a4b);border-color:currentColor}
-.wbg-badge-off{color:var(--dsw-alias-text-secondary)}
+.wbg-dot{width:7px;height:7px;border-radius:50%;flex:none;background:var(--dsw-alias-state-idle-primary,#b0b0b0)}
+.wbg-dot-on{background:var(--dsw-alias-state-success-primary,#1a7f37);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-success-primary,#1a7f37) 18%,transparent)}
+.wbg-badge{font-size:11px;padding:1.5px 8px;border-radius:999px;border:1px solid var(--dsw-alias-border-l1,#e3e3e3);color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
+.wbg-secret{display:flex;align-items:center;gap:8px;background:var(--dsw-alias-bg-layer-2,#f6f6f6);border:1px solid var(--dsw-alias-border-l1,#eee);border-radius:8px;padding:8px 11px}
+.wbg-secret code{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary,#666);letter-spacing:.3px}
+.wbg-secret-live code{color:var(--dsw-alias-label-primary,#1a1a1a);letter-spacing:0}
 .wbg-grow{flex:1;min-width:120px}
 .wbg-spacer{flex:1}
-.wbg-code{background:var(--dsw-alias-bg-sunken,rgba(127,127,127,.09));border-radius:7px;padding:9px 11px;overflow-x:auto;white-space:pre;margin:0}
-.wbg-error{color:var(--dsw-alias-danger,#e5484d);font-size:12px}
+.wbg-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px 18px}
+.wbg-field{display:flex;flex-direction:column;gap:4px;min-width:0}
+.wbg-field > span{color:var(--dsw-alias-label-secondary,#666);font-size:11.5px}
+.wbg-field .wbg-select,.wbg-field .wbg-input{width:100%}
+.wbg-code{background:var(--dsw-alias-bg-layer-2,#f6f6f6);border:1px solid var(--dsw-alias-border-l1,#eee);border-radius:8px;padding:11px 13px;overflow-x:auto;white-space:pre;margin:0;font-size:11.5px;line-height:1.7}
+.wbg-alert{display:flex;gap:10px;align-items:flex-start;border-radius:10px;padding:11px 13px;font-size:12px;border:1px solid transparent}
+.wbg-alert-error{background:color-mix(in srgb,var(--dsw-alias-state-error-primary,#d1242f) 9%,transparent);border-color:color-mix(in srgb,var(--dsw-alias-state-error-primary,#d1242f) 30%,transparent);color:var(--dsw-alias-state-error-primary,#d1242f)}
+.wbg-alert-warn{background:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#9a6700) 9%,transparent);border-color:color-mix(in srgb,var(--dsw-alias-state-warn-primary,#9a6700) 28%,transparent);color:var(--dsw-alias-state-warn-primary,#9a6700)}
+.wbg-alert-icon{flex:none;font-weight:700;line-height:1.4}
+.wbg-alert-body{flex:1;min-width:0}
+.wbg-modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.42);display:flex;align-items:center;justify-content:center;z-index:60;padding:24px}
+.wbg-modal{background:var(--dsw-alias-bg-overlay,#fff);color:var(--dsw-alias-label-primary,#1a1a1a);border:1px solid var(--dsw-alias-border-l2,#cfcfcf);border-radius:14px;box-shadow:0 18px 48px rgba(0,0,0,.24);width:min(560px,100%);padding:20px 22px;display:flex;flex-direction:column;gap:14px}
+.wbg-modal h3{margin:0;font-size:15px;font-weight:600}
+.wbg-modal-actions{display:flex;justify-content:flex-end;gap:8px}
+.wbg-tag{font-size:11px;color:var(--dsw-alias-label-tertiary,#8a8a8a)}
+@media (max-width:720px){
+  .wbg-ep{grid-template-columns:1fr;gap:6px}
+  .wbg-grid{grid-template-columns:1fr}
+}
 `
 
     /* ── 数据访问 ───────────────────────────────────────────────────── */
@@ -172,37 +235,84 @@ window.__ModuleLoader__.load({
 
     /* ── 小组件 ─────────────────────────────────────────────────────── */
 
-    function CopyText({ value, t }) {
+    /** 复制按钮：只在有真正可用的值时渲染。 */
+    function CopyButton({ value, t, small }) {
       const [done, setDone] = useState(false)
+      const timer = useRef(undefined)
+      useEffect(() => () => { if (timer.current !== undefined) clearTimeout(timer.current) }, [])
       const copy = useCallback(() => {
-        const done2 = () => {
+        const finish = () => {
           setDone(true)
-          setTimeout(() => setDone(false), 1400)
+          timer.current = setTimeout(() => setDone(false), 1500)
         }
         if (navigator.clipboard?.writeText) {
-          navigator.clipboard.writeText(value).then(done2, () => {})
+          navigator.clipboard.writeText(value).then(finish, () => finish())
           return
         }
+        /* 兜底：临时 textarea，用完立刻移除，不留在 DOM 里。 */
         const area = document.createElement('textarea')
         area.value = value
+        area.setAttribute('readonly', '')
+        area.style.position = 'fixed'
+        area.style.opacity = '0'
         document.body.appendChild(area)
         area.select()
         try { document.execCommand('copy') } catch {}
         document.body.removeChild(area)
-        done2()
+        finish()
       }, [value])
       return h('button', {
         type: 'button',
-        className: 'wbg-btn',
+        className: `wbg-btn${small === true ? ' wbg-btn-sm' : ''}`,
         onClick: copy,
         'aria-label': `${t.copy} ${value}`,
       }, done ? t.copied : t.copy)
     }
 
+    /** 一行「可复制的地址」。 */
+    function EndpointRow({ entry, t, primary }) {
+      return h('div', { className: 'wbg-ep' },
+        h('div', null,
+          h('span', { className: 'wbg-ep-name' }, entry.name),
+          h('span', { className: 'wbg-ep-hint' }, entry.hint)),
+        h('div', { className: 'wbg-ep-url' },
+          h('code', { className: 'wbg-mono', title: entry.baseUrl }, entry.baseUrl),
+          h('span', { className: 'wbg-caption' }, `${t.requestUrl}: ${entry.requestUrl}`)),
+        h(CopyButton, { value: entry.baseUrl, t, small: true }),
+      )
+    }
+
+    /** 一个表单字段（标签在上、控件在下）。 */
     function Field({ label, children }) {
-      return h('div', { className: 'wbg-row wbg-row-tight' },
-        h('span', { className: 'wbg-label' }, label),
+      return h('label', { className: 'wbg-field' },
+        h('span', null, label),
         children)
+    }
+
+    /** 明文弹窗：只在这个弹窗里给出可复制的明文。 */
+    function SecretDialog({ secret, t, onClose, intro }) {
+      useEffect(() => {
+        const onKey = (event) => { if (event.key === 'Escape') onClose() }
+        window.addEventListener('keydown', onKey)
+        return () => window.removeEventListener('keydown', onKey)
+      }, [onClose])
+      return h('div', {
+        className: 'wbg-modal-mask',
+        role: 'presentation',
+        onMouseDown: (event) => { if (event.target === event.currentTarget) onClose() },
+      },
+        h('div', { className: 'wbg-modal', role: 'dialog', 'aria-modal': 'true', 'aria-label': t.reveal },
+          h('h3', null, t.reveal),
+          h('p', { className: 'wbg-hint' }, intro ?? t.secretCopied),
+          h('div', { className: 'wbg-secret wbg-secret-live' },
+            h('code', { className: 'wbg-mono' }, secret),
+            h(CopyButton, { value: secret, t }),
+          ),
+          h('div', { className: 'wbg-modal-actions' },
+            h('button', { type: 'button', className: 'wbg-btn wbg-btn-primary', onClick: onClose }, t.dismiss),
+          ),
+        ),
+      )
     }
 
     /* ── 单把 key ───────────────────────────────────────────────────── */
@@ -211,10 +321,10 @@ window.__ModuleLoader__.load({
       const [label, setLabel] = useState(entry.label)
       const [enabled, setEnabled] = useState(entry.enabled)
       const [policy, setPolicy] = useState(entry.policy)
-      const [secret, setSecret] = useState(undefined)
       const [busy, setBusy] = useState(false)
       const [error, setError] = useState(undefined)
-      const [savedAt, setSavedAt] = useState(0)
+      const [saved, setSaved] = useState(false)
+      const [dialog, setDialog] = useState(undefined)
 
       useEffect(() => {
         setLabel(entry.label)
@@ -231,14 +341,11 @@ window.__ModuleLoader__.load({
         || enabled !== entry.enabled
         || JSON.stringify(policy) !== JSON.stringify(entry.policy)
 
-      const setPolicyField = (field, value) => {
+      const patchPolicy = (field, value) => {
         setPolicy((current) => {
           const next = { ...current, [field]: value }
           if (field === 'mode') {
-            /*
-             * 切模式时清掉与新模式无关的字段：留着上一种模式的残留值会让
-             * 「固定账号」key 带着一个上个模式挑的 provider，读起来像是还在用。
-             */
+            /* 切模式时清掉无关字段，免得留下一份读起来像还在用的残留。 */
             if (value !== 'named' && value !== 'account') {
               delete next.provider
               delete next.model
@@ -257,7 +364,8 @@ window.__ModuleLoader__.load({
         setError(undefined)
         try {
           await onSave({ id: entry.id, label, enabled, policy })
-          setSavedAt(Date.now())
+          setSaved(true)
+          setTimeout(() => setSaved(false), 1600)
         } catch (caught) {
           setError(String(caught.message ?? caught))
         } finally {
@@ -265,16 +373,12 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const doReveal = async () => {
-        if (secret !== undefined) {
-          setSecret(undefined)
-          return
-        }
+      const reveal = async () => {
         setBusy(true)
         setError(undefined)
         try {
           const body = await onReveal(entry.id)
-          setSecret(body.secret)
+          setDialog({ secret: body.secret })
         } catch (caught) {
           setError(String(caught.message ?? caught))
         } finally {
@@ -282,12 +386,12 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const doRotate = async () => {
+      const rotate = async () => {
         setBusy(true)
         setError(undefined)
         try {
           const body = await onRotate(entry.id)
-          setSecret(body.secret ?? body.keys?.find?.((row) => row.id === entry.id)?.secret)
+          setDialog({ secret: body.secret, intro: t.rotate })
         } catch (caught) {
           setError(String(caught.message ?? caught))
         } finally {
@@ -295,18 +399,23 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const removed = () => {
+      const remove = () => {
         if (!window.confirm(t.confirmRemove)) return
         setBusy(true)
-        onDelete(entry.id).catch((caught) => setError(String(caught.message ?? caught))).finally(() => setBusy(false))
+        onDelete(entry.id)
+          .catch((caught) => setError(String(caught.message ?? caught)))
+          .finally(() => setBusy(false))
       }
 
-      const shownSecret = secret ?? entry.masked
-      const modeNeedsModel = policy.mode === 'named' && (policy.model ?? '') === ''
-      const modeNeedsAccount = policy.mode === 'account' && (policy.accountId ?? '') === ''
+      const needsModel = (policy.mode === 'named' || policy.mode === 'account') && (policy.model ?? '') === ''
+      const needsAccount = policy.mode === 'account' && (policy.accountId ?? '') === ''
+      const visibleModels = policy.provider === undefined
+        ? models
+        : models.filter((model) => model.provider === policy.provider)
 
       return h('div', { className: 'wbg-item' },
         h('div', { className: 'wbg-item-head' },
+          h('span', { className: `wbg-dot${enabled ? ' wbg-dot-on' : ''}`, 'aria-hidden': true }),
           h('input', {
             className: 'wbg-input wbg-grow',
             value: label,
@@ -314,110 +423,109 @@ window.__ModuleLoader__.load({
             'aria-label': t.label,
             onChange: (event) => setLabel(event.target.value),
           }),
-          h('span', { className: `wbg-badge ${enabled ? 'wbg-badge-on' : 'wbg-badge-off'}` }, enabled ? t.enabled : t.disabled),
-          h('span', { className: 'wbg-badge' }, policy.mode),
+          h('span', { className: 'wbg-badge' }, t[`mode_${policy.mode}`] ?? policy.mode),
           h('span', { className: 'wbg-spacer' }),
-          h('button', { type: 'button', className: 'wbg-btn', onClick: doReveal, disabled: busy }, secret === undefined ? t.reveal : t.hide),
-          h('button', { type: 'button', className: 'wbg-btn', onClick: doRotate, disabled: busy }, t.rotate),
-          h('button', { type: 'button', className: 'wbg-btn wbg-btn-danger', onClick: removed, disabled: busy }, t.remove),
+          h('button', { type: 'button', className: 'wbg-btn wbg-btn-sm', onClick: reveal, disabled: busy }, t.reveal),
+          h('button', { type: 'button', className: 'wbg-btn wbg-btn-sm', onClick: rotate, disabled: busy }, t.rotate),
+          h('button', { type: 'button', className: 'wbg-btn wbg-btn-sm wbg-btn-danger', onClick: remove, disabled: busy }, t.remove),
         ),
 
-        h('div', { className: 'wbg-row wbg-row-tight' },
-          h('code', { className: 'wbg-mono wbg-grow' }, shownSecret),
-          h(CopyText, { value: shownSecret, t }),
+        /*
+         * 掩码是纯文本，**刻意不配复制按钮**：它含 `*` 占位，复制出去进 HTTP 头
+         * 只会得到 401，或者像 U+2026 那样直接让客户端抛 ByteString 错误。
+         */
+        h('div', { className: 'wbg-secret' },
+          h('code', { className: 'wbg-mono', 'aria-label': 'masked key' }, entry.masked),
+          h('span', { className: 'wbg-caption' }, t.secretHidden),
         ),
 
-        h(Field, { label: t.policy },
-          h('select', {
-            className: 'wbg-select',
-            value: policy.mode,
-            'aria-label': t.policy,
-            onChange: (event) => setPolicyField('mode', event.target.value),
-          }, modes.map((mode) => h('option', { key: mode, value: mode }, t[`mode_${mode}`] ?? mode))),
-        ),
-
-        (policy.mode === 'named' || policy.mode === 'account') ? h('div', { className: 'wbg-row wbg-row-tight' },
-          h('span', { className: 'wbg-label' }, t.provider),
-          h('select', {
-            className: 'wbg-select',
-            value: policy.provider ?? '',
-            'aria-label': t.provider,
-            onChange: (event) => {
-              const provider = event.target.value
-              setPolicyField('provider', provider === '' ? undefined : provider)
-            },
-          },
-            h('option', { value: '' }, t.none),
-            providers.map((provider) => h('option', { key: provider.id, value: provider.id }, provider.label)),
+        h('div', { className: 'wbg-grid' },
+          h(Field, { label: t.policy },
+            h('select', {
+              className: 'wbg-select',
+              value: policy.mode,
+              onChange: (event) => patchPolicy('mode', event.target.value),
+            }, modes.map((mode) => h('option', { key: mode, value: mode }, t[`mode_${mode}`] ?? mode))),
           ),
-        ) : null,
 
-        policy.mode === 'account' ? h('div', { className: 'wbg-row wbg-row-tight' },
-          h('span', { className: 'wbg-label' }, t.account),
-          h('select', {
-            className: 'wbg-select',
-            value: policy.accountId ?? '',
-            'aria-label': t.account,
-            onChange: (event) => {
-              const accountId = event.target.value
-              const found = accounts.find((account) => account.id === accountId)
-              setPolicy((current) => ({
-                ...current,
-                accountId,
-                ...(found === undefined ? {} : { region: found.region }),
-              }))
-            },
-          },
-            h('option', { value: '' }, t.selectAccount),
-            accounts.map((account) => h('option', { key: `${account.region}:${account.id}`, value: account.id },
-              `${account.name || account.id.slice(0, 8)} · ${account.region === 'global' ? '国际版' : '国内版'}`)),
+          h(Field, { label: t.effort },
+            h('select', {
+              className: 'wbg-select',
+              value: policy.reasoningEffort ?? '',
+              onChange: (event) => patchPolicy('reasoningEffort', event.target.value === '' ? undefined : event.target.value),
+            }, EFFORTS.map((effort) => h('option', { key: effort, value: effort }, effort === '' ? t.effort_auto : effort))),
           ),
-        ) : null,
 
-        (policy.mode === 'named' || policy.mode === 'account') ? h('div', { className: 'wbg-row wbg-row-tight' },
-          h('span', { className: 'wbg-label' }, t.model),
-          h('select', {
-            className: 'wbg-select wbg-grow',
-            value: policy.model ?? '',
-            'aria-label': t.model,
-            onChange: (event) => {
-              const model = event.target.value
-              const found = models.find((row) => row.id === model)
-              setPolicy((current) => ({
-                ...current,
-                model,
-                ...(found === undefined ? {} : { provider: found.provider }),
-              }))
-            },
-          },
-            h('option', { value: '' }, t.selectModel),
-            models
-              .filter((model) => (policy.provider === undefined ? true : model.provider === policy.provider))
-              .map((model) => h('option', { key: `${model.provider}:${model.id}`, value: model.id },
-                `${model.name}${model.region === undefined ? '' : ` · ${model.region}`}`)),
-          ),
-        ) : null,
+          (policy.mode === 'named' || policy.mode === 'account')
+            ? h(Field, { label: t.provider },
+              h('select', {
+                className: 'wbg-select',
+                value: policy.provider ?? '',
+                onChange: (event) => patchPolicy('provider', event.target.value === '' ? undefined : event.target.value),
+              },
+                h('option', { value: '' }, t.none),
+                providers.map((provider) => h('option', { key: provider.id, value: provider.id }, provider.label)),
+              ))
+            : null,
 
-        h(Field, { label: t.effort },
-          h('select', {
-            className: 'wbg-select',
-            value: policy.reasoningEffort ?? '',
-            'aria-label': t.effort,
-            onChange: (event) => setPolicyField('reasoningEffort', event.target.value === '' ? undefined : event.target.value),
-          }, EFFORTS.map((effort) => h('option', { key: effort, value: effort }, effort === '' ? t.effort_auto : effort))),
+          policy.mode === 'account'
+            ? h(Field, { label: t.account },
+              h('select', {
+                className: 'wbg-select',
+                value: policy.accountId ?? '',
+                onChange: (event) => {
+                  const accountId = event.target.value
+                  const found = accounts.find((account) => account.id === accountId)
+                  setPolicy((current) => ({
+                    ...current,
+                    accountId,
+                    ...(found === undefined ? {} : { region: found.region }),
+                  }))
+                },
+              },
+                h('option', { value: '' }, t.selectAccount),
+                accounts.map((account) => h('option', { key: `${account.region}:${account.id}`, value: account.id },
+                  `${account.name || account.id.slice(0, 8)} · ${account.region === 'global' ? '国际版' : '国内版'}`)),
+              ))
+            : null,
+
+          (policy.mode === 'named' || policy.mode === 'account')
+            ? h(Field, { label: t.model },
+              h('select', {
+                className: 'wbg-select',
+                value: policy.model ?? '',
+                onChange: (event) => {
+                  const model = event.target.value
+                  const found = models.find((row) => row.id === model)
+                  setPolicy((current) => ({
+                    ...current,
+                    model,
+                    ...(found === undefined ? {} : { provider: found.provider }),
+                  }))
+                },
+              },
+                h('option', { value: '' }, t.selectModel),
+                visibleModels.map((model) => h('option', { key: `${model.provider}:${model.id}`, value: model.id },
+                  `${model.name}${model.region === undefined ? '' : ` · ${model.region}`}`)),
+              ))
+            : null,
         ),
 
-        policy.mode === 'dsh' && state?.defaults?.dsh ? h('div', { className: 'wbg-hint' },
-          `${t.currentDsh}：${state.defaults.dsh.provider} / ${state.defaults.dsh.model}`) : null,
-        policy.mode === 'session' && state?.defaults?.session ? h('div', { className: 'wbg-hint' },
-          `${t.currentSession}：${state.defaults.session.provider} / ${state.defaults.session.model}`) : null,
+        policy.mode === 'dsh' && state?.defaults?.dsh
+          ? h('p', { className: 'wbg-caption' }, `${t.currentDsh}: ${state.defaults.dsh.provider} / ${state.defaults.dsh.model}`)
+          : null,
+        policy.mode === 'session' && state?.defaults?.session
+          ? h('p', { className: 'wbg-caption' }, `${t.currentSession}: ${state.defaults.session.provider} / ${state.defaults.session.model}`)
+          : null,
 
-        modeNeedsModel ? h('div', { className: 'wbg-warn' }, t.needsModel) : null,
-        modeNeedsAccount ? h('div', { className: 'wbg-warn' }, t.needsAccount) : null,
-        error === undefined ? null : h('div', { className: 'wbg-error' }, error),
+        needsModel ? h('p', { className: 'wbg-warn' }, t.needsModel) : null,
+        needsAccount ? h('p', { className: 'wbg-warn' }, t.needsAccount) : null,
+        error === undefined ? null : h('div', { className: 'wbg-alert wbg-alert-error' },
+          h('span', { className: 'wbg-alert-icon', 'aria-hidden': true }, '!'),
+          h('span', { className: 'wbg-alert-body' }, error)),
 
-        h('div', { className: 'wbg-row wbg-row-tight' },
-          h('label', { className: 'wbg-row wbg-row-tight', style: { gap: 6, alignItems: 'center' } },
+        h('div', { className: 'wbg-row' },
+          h('label', { className: 'wbg-row', style: { gap: 6, cursor: 'pointer' } },
             h('input', {
               type: 'checkbox',
               checked: enabled,
@@ -426,7 +534,7 @@ window.__ModuleLoader__.load({
             h('span', { className: 'wbg-hint' }, t.enabled),
           ),
           h('span', { className: 'wbg-spacer' }),
-          savedAt === 0 ? null : h('span', { className: 'wbg-hint' }, t.saved),
+          saved ? h('span', { className: 'wbg-caption' }, t.saved) : null,
           h('button', {
             type: 'button',
             className: 'wbg-btn wbg-btn-primary',
@@ -434,27 +542,24 @@ window.__ModuleLoader__.load({
             disabled: busy || !dirty,
           }, t.save),
         ),
+
+        dialog === undefined ? null : h(SecretDialog, {
+          secret: dialog.secret,
+          intro: dialog.intro,
+          t,
+          onClose: () => setDialog(undefined),
+        }),
       )
     }
 
     /* ── 页面 ───────────────────────────────────────────────────────── */
 
-    /** 按浏览器语言定一次文案。 */
-    function textsFor() {
-      return (typeof navigator === 'object' && /^zh/i.test(navigator.language ?? '')) ? TEXT.zh : TEXT.en
-    }
-
     function GatewaySection() {
       const [state, setState] = useState(undefined)
       const [error, setError] = useState(undefined)
       const [busy, setBusy] = useState(false)
-
-      /*
-       * 宿主没有把 locale 快照透传到 ownerProps，所以这里按浏览器语言定一次。
-       * 不做实时切换：用户改语言后重开设置页即可，代价远小于为此接一套
-       * locale 订阅。
-       */
-      const t = textsFor()
+      const [created, setCreated] = useState(undefined)
+      const t = texts()
 
       const reload = useCallback(async () => {
         try {
@@ -469,51 +574,57 @@ window.__ModuleLoader__.load({
 
       const addKey = useCallback(async () => {
         setBusy(true)
+        setError(undefined)
         try {
           const body = await adminPost('/keys', { label: '', policy: { mode: 'dsh' } })
-          setState(await adminGet('/state'))
-          if (body?.created?.secret) {
-            window.alert(`${t.addKey}: ${body.created.id}\n\n${body.created.secret}`)
-          }
+          await reload()
+          if (body?.created?.secret !== undefined) setCreated(body.created.secret)
         } catch (caught) {
           setError(String(caught.message ?? caught))
         } finally {
           setBusy(false)
         }
-      }, [t])
+      }, [reload])
 
       const saveKey = useCallback(async (patch) => {
         await adminPost('/keys/update', patch)
-        setState(await adminGet('/state'))
-      }, [])
+        await reload()
+      }, [reload])
 
       const deleteKey = useCallback(async (id) => {
         await adminPost('/keys/delete', { id })
-        setState(await adminGet('/state'))
-      }, [])
+        await reload()
+      }, [reload])
 
       const rotateKey = useCallback(async (id) => {
         const body = await adminPost('/keys/rotate', { id })
-        setState(await adminGet('/state'))
+        await reload()
         return body
-      }, [])
+      }, [reload])
 
       const revealKey = useCallback((id) => adminPost('/keys/reveal', { id }), [])
 
       if (state === undefined) {
-        return h('div', { className: 'wbg-page' },
+        return h('div', { className: 'wbg' },
           h('style', null, CSS),
-          h('div', { className: 'wbg-hint' }, error ?? t.loading))
+          error === undefined
+            ? h('p', { className: 'wbg-hint' }, t.loading)
+            : h('div', { className: 'wbg-alert wbg-alert-error' },
+              h('span', { className: 'wbg-alert-icon', 'aria-hidden': true }, '!'),
+              h('div', { className: 'wbg-alert-body' },
+                h('strong', null, `${t.errorTitle}: `), error)))
       }
 
-      const example = [
-        `curl ${state.baseUrl}/v1/chat/completions \\`,
-        '  -H "Authorization: Bearer <your-key-secret>" \\',
+      const endpoints = state.endpoints ?? []
+
+      const curlExample = [
+        `curl ${endpoints[0]?.requestUrl ?? `${state.baseUrl}/v1/chat/completions`} \\`,
+        '  -H "Authorization: Bearer <key secret>" \\',
         '  -H "Content-Type: application/json" \\',
         `  -d '{"messages":[{"role":"user","content":"hi"}]}'`,
       ].join('\n')
 
-      return h('div', { className: 'wbg-page' },
+      return h('div', { className: 'wbg' },
         h('style', null, CSS),
 
         h('div', { className: 'wbg-head' },
@@ -521,28 +632,32 @@ window.__ModuleLoader__.load({
           h('p', { className: 'wbg-sub' }, t.subtitle),
         ),
 
+        /* 四种协议的准确地址：每行一个成品，点一下就复制。 */
         h('div', { className: 'wbg-card' },
-          h(Field, { label: t.baseUrl },
-            h('code', { className: 'wbg-mono wbg-grow' }, state.baseUrl),
-            h(CopyText, { value: state.baseUrl, t }),
+          h('div', { className: 'wbg-row' },
+            h('strong', { className: 'wbg-sec-title' }, t.endpoints),
+            h('span', { className: 'wbg-spacer' }),
+            h('span', { className: 'wbg-caption' }, t.endpointsHint),
           ),
-          h('div', { className: 'wbg-row', style: { marginTop: 8 } },
-            h('span', { className: 'wbg-label' }, t.configPath),
-            h('code', { className: 'wbg-mono', style: { flex: 1 } }, state.configPath),
-          ),
+          h('div', null, endpoints.map((entry) => h(EndpointRow, { key: entry.id, entry, t }))),
+          h('p', { className: 'wbg-caption', style: { marginTop: 2 } },
+            `${t.root}: ${state.baseUrl}`),
         ),
 
         h('div', { className: 'wbg-row' },
-          h('strong', null, t.keys),
+          h('strong', { className: 'wbg-sec-title' }, t.keys),
           h('span', { className: 'wbg-spacer' }),
           h('button', { type: 'button', className: 'wbg-btn wbg-btn-primary', onClick: addKey, disabled: busy }, t.addKey),
         ),
 
-        error === undefined ? null : h('div', { className: 'wbg-error' }, error),
+        error === undefined ? null : h('div', { className: 'wbg-alert wbg-alert-error' },
+          h('span', { className: 'wbg-alert-icon', 'aria-hidden': true }, '!'),
+          h('div', { className: 'wbg-alert-body' },
+            h('strong', null, `${t.errorTitle}: `), error)),
 
         h('div', { className: 'wbg-list' },
           state.keys.length === 0
-            ? h('div', { className: 'wbg-hint' }, t.noKeys)
+            ? h('div', { className: 'wbg-card wbg-card-soft' }, h('p', { className: 'wbg-hint' }, t.noKeys))
             : state.keys.map((entry) => h(KeyCard, {
               key: entry.id,
               entry,
@@ -555,14 +670,19 @@ window.__ModuleLoader__.load({
             })),
         ),
 
-        h('div', { className: 'wbg-card' },
-          h('div', { className: 'wbg-row' },
-            h('strong', null, t.example),
-            h('span', { className: 'wbg-spacer' }),
-          ),
-          h('p', { className: 'wbg-hint', style: { margin: '4px 0 8px' } }, t.exampleHint),
-          h('pre', { className: 'wbg-code wbg-mono' }, example),
+        h('div', { className: 'wbg-card wbg-card-soft' },
+          h('strong', { className: 'wbg-sec-title' }, t.guide),
+          h('p', { className: 'wbg-hint' }, t.guideHint),
+          h('pre', { className: 'wbg-code wbg-mono' }, curlExample),
+          h('p', { className: 'wbg-caption' }, `${t.configPath}: ${state.configPath}`),
         ),
+
+        created === undefined ? null : h(SecretDialog, {
+          secret: created,
+          intro: t.created,
+          t,
+          onClose: () => setCreated(undefined),
+        }),
       )
     }
 
@@ -573,8 +693,7 @@ window.__ModuleLoader__.load({
           name: 'settings.section',
           id: NS,
           order: 36,
-          /* 每次投影都重读，语言跟着浏览器走，不需要重新注册。 */
-          label: () => textsFor().title,
+          label: () => texts().title,
         }, GatewaySection))
       },
     }

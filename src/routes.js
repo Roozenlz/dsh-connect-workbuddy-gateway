@@ -23,6 +23,7 @@ import { collectModels, directModelsByRegion, openAiCatalog } from './models.js'
 import { readConfig, writeConfig, makeKey, normalizePolicy, normalizeConfig, newSecret, maskSecret, POLICY_MODES } from './config.js'
 import { allAccounts } from './accounts.js'
 import { regionOfProvider, providerOfRegion } from './resolve.js'
+import { describeEndpoints, stripApiPrefix } from './endpoints.js'
 
 const PREFIX = '/workbuddy-gateway'
 const ADMIN_PREFIX = '/plugins/dsh-workbuddy-gateway'
@@ -65,7 +66,7 @@ async function dispatchApi(req, res, ctx, env) {
   if (keyEntry === undefined) {
     sendJson(res, 401, {
       error: {
-        message: 'invalid gateway api key; create one in Settings → WorkBuddy Gateway and use its secret',
+        message: 'invalid gateway api key: copy the key’s secret with the Copy button in Settings → WorkBuddy 模型网关 (masked values ending in … are not usable)',
         type: 'invalid_request_error',
         code: 'invalid_api_key',
       },
@@ -74,17 +75,24 @@ async function dispatchApi(req, res, ctx, env) {
   }
 
   const scoped = { ...env, key: keyEntry }
+  /*
+   * `/v1`、`/anthropic`、`/openai` 三个前缀只是方便客户端填写，语义与根路径
+   * 相同；归一到路由表那一层，下面只写一套。
+   */
+  const route = stripApiPrefix(path)
   try {
-    if (path === '/healthz' || path === '/') {
+    if (route === '/healthz' || route === '/') {
+      const info = describeEndpoints(originOf(ctx))
       sendJson(res, 200, {
         ok: true,
-        base_url: baseUrlOf(ctx),
+        root: info.root,
+        endpoints: info.endpoints.map((entry) => ({ id: entry.id, name: entry.name, baseUrl: entry.baseUrl })),
         key: { id: keyEntry.id, label: keyEntry.label, policy: keyEntry.policy },
-        protocols: ['openai-chat', 'openai-responses', 'anthropic-messages', 'gemini'],
+        protocols: info.endpoints.map((entry) => entry.id),
       })
       return
     }
-    if (method === 'GET' && path === '/v1/models') {
+    if (method === 'GET' && route === '/models') {
       /*
        * 目录按这把 key 的可见范围裁剪：`enableGlobal` 关掉时不列国际版，
        * 否则客户端会在一个永远 400 的模型上反复重试。
@@ -93,7 +101,7 @@ async function dispatchApi(req, res, ctx, env) {
       sendJson(res, 200, openAiCatalog(entries, env.config))
       return
     }
-    if (method === 'GET' && path === '/v1/accounts') {
+    if (method === 'GET' && route === '/accounts') {
       sendJson(res, 200, {
         accounts: allAccounts(env.config.enableGlobal === false ? ['cn'] : ['cn', 'global']).map((account) => ({
           region: account.region,
@@ -105,7 +113,7 @@ async function dispatchApi(req, res, ctx, env) {
       })
       return
     }
-    if (method === 'GET' && path === '/v1beta/models') {
+    if (method === 'GET' && (route === '/v1beta/models' || route === '/models/gemini')) {
       const entries = await catalogEntries(env)
       sendJson(res, 200, geminiCatalog(entries.map((entry) => ({
         id: entry.id,
@@ -115,19 +123,19 @@ async function dispatchApi(req, res, ctx, env) {
       }))))
       return
     }
-    if (method === 'POST' && path === '/v1/chat/completions') {
+    if (method === 'POST' && route === '/chat/completions') {
       await handleChat(req, res, scoped)
       return
     }
-    if (method === 'POST' && path === '/v1/responses') {
+    if (method === 'POST' && route === '/responses') {
       await handleResponses(req, res, scoped)
       return
     }
-    if (method === 'POST' && path === '/v1/messages') {
+    if (method === 'POST' && route === '/messages') {
       await handleMessages(req, res, scoped)
       return
     }
-    if (method === 'POST' && path === '/v1/messages/count_tokens') {
+    if (method === 'POST' && route === '/messages/count_tokens') {
       sendJson(res, 200, { input_tokens: 0 })
       return
     }
@@ -244,13 +252,17 @@ async function dispatchAdmin(req, res, ctx, env) {
   }
 }
 
-/** 设置页需要的一次性快照：key 表、模型目录、账号、当前策略可选项。 */
+/** 设置页需要的一次性快照：key 表、模型目录、账号、四种协议的准确地址。 */
 async function adminState(ctx, env) {
   const config = readConfig()
   const providers = env.providers()
   const models = await catalogEntries(env)
+  const origin = originOf(ctx)
   return {
-    baseUrl: baseUrlOf(ctx),
+    origin,
+    /* 兼容旧字段：root 就是不带协议后缀的那条基址。 */
+    baseUrl: `${origin}${PREFIX}`,
+    endpoints: describeEndpoints(origin).endpoints,
     configPath: configPathOf(),
     policyModes: POLICY_MODES,
     providers: providers.map((provider) => ({
@@ -364,13 +376,18 @@ async function catalogEntries(env) {
   return entries.filter((entry) => entry.region !== 'global')
 }
 
-/** 本机 base_url，设置页展示给用户。 */
-export function baseUrlOf(ctx) {
+/** 本机 origin（不含网关前缀），设置页据此拼出四种协议的地址。 */
+export function originOf(ctx) {
   try {
-    return `${ctx.webServer.getOrigin()}${PREFIX}`
+    return ctx.webServer.getOrigin()
   } catch {
-    return `http://127.0.0.1:0${PREFIX}`
+    return 'http://127.0.0.1:0'
   }
+}
+
+/** 不带协议后缀的基址，保留给需要「一条根地址」的场景。 */
+export function baseUrlOf(ctx) {
+  return `${originOf(ctx)}${PREFIX}`
 }
 
 function configPathOf() {

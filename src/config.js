@@ -161,8 +161,22 @@ export function makeKey(overrides = {}) {
   })
 }
 
-/** 展示用掩码。 */
+/**
+ * 展示用掩码。
+ *
+ * 只显示长度与前 4 / 后 4 位，中间一律用 `*`。这有几个刻意的决定：
+ *
+ *   - **不用 `…`（U+2026）**。它是多字节字符，客户端把它当 HTTP 头发出去会直接
+ *     抛 `Cannot convert argument to a ByteString because the character at index N
+ *     has a value of 8230`。用户从这个界面复制到的任何东西都必须是可安全放进
+ *     header 的纯 ASCII。
+ *   - **不用 `·` / `•`** 同理。
+ *   - 前后各留 4 位，够用户在人眼层面认出「这是哪一把」，但不足以还原。
+ *
+ * 真正的复制入口永远是 `reveal` 拿到的明文，界面上的掩码**不提供复制**。
+ */
 export function maskSecret(secret) {
-  if (typeof secret !== 'string' || secret.length <= 14) return '••••••'
-  return `${secret.slice(0, 8)}…${secret.slice(-4)}`
+  if (typeof secret !== 'string' || secret.length === 0) return '****'
+  if (secret.length <= 12) return '*'.repeat(secret.length)
+  return `${secret.slice(0, 4)}${'*'.repeat(Math.min(16, secret.length - 8))}${secret.slice(-4)}`
 }

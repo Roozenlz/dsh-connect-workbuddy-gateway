@@ -183,7 +183,7 @@ let firstKey
   const created = await adminPost('/keys/reveal', { id: state.body.keys[0].id })
   firstKey = created.body.secret
   check('reveal 拿到明文', typeof firstKey === 'string' && firstKey.startsWith('wbg-'), String(firstKey))
-  check('state 里是打码的', state.body.keys[0].masked.includes('…'), state.body.keys[0].masked)
+  check('state 里是打码的', /^\S{4}\*+\S{4}$/u.test(state.body.keys[0].masked), state.body.keys[0].masked)
   check('目录已投影', state.body.models?.length === 4, String(state.body.models?.length))
 }
 
@@ -199,6 +199,72 @@ console.log('\n== 鉴权 ==')
   check('x-goog-api-key', viaGoogle.status === 200, String(viaGoogle.status))
   const viaQuery = await fetch(`${API}/v1/models?key=${encodeURIComponent(firstKey)}`)
   check('?key=', viaQuery.status === 200, String(viaQuery.status))
+}
+
+console.log('\n== 掩码必须是可安全放进 HTTP 头的 ASCII ==')
+{
+  /*
+   * 这条来自真实故障：掩码里用了 `…`（U+2026），用户把它当 key 填进客户端后
+   * 报 `Cannot convert argument to a ByteString ... value of 8230`。
+   */
+  const state = await adminGet('/state')
+  const masked = state.body.keys[0].masked
+  check('全是 ASCII', /^[\x20-\x7E]+$/u.test(masked), JSON.stringify(masked))
+  check('不含 U+2026', !masked.includes('\u2026'), JSON.stringify(masked))
+  check('不含 U+00B7/U+2022', !masked.includes('\u00b7') && !masked.includes('\u2022'), JSON.stringify(masked))
+  const byteSafe = (() => {
+    try {
+      /* 模拟 HTTP 头写入：任何 >255 的码点都会抛。 */
+      Buffer.from(masked, 'latin1')
+      for (const ch of masked) if (ch.codePointAt(0) > 255) return false
+      return true
+    } catch {
+      return false
+    }
+  })()
+  check('可编码成 ByteString', byteSafe, JSON.stringify(masked))
+}
+
+console.log('\n== 四种协议的准确地址 ==')
+{
+  const state = await adminGet('/state')
+  const endpoints = state.body.endpoints ?? []
+  check('四条', endpoints.length === 4, String(endpoints.length))
+  const byId = Object.fromEntries(endpoints.map((entry) => [entry.id, entry]))
+  check('openai base 带 /v1', byId['openai-chat']?.baseUrl.endsWith('/workbuddy-gateway/v1'), byId['openai-chat']?.baseUrl)
+  check('anthropic base 不带 /v1', byId.anthropic?.baseUrl.endsWith('/workbuddy-gateway'), byId.anthropic?.baseUrl)
+  check('anthropic 实际请求 /v1/messages', byId.anthropic?.requestUrl.endsWith('/v1/messages'), byId.anthropic?.requestUrl)
+  check('gemini base 到根', byId.gemini?.baseUrl.endsWith('/workbuddy-gateway'), byId.gemini?.baseUrl)
+  check('gemini 实际请求 /v1beta', byId.gemini?.requestUrl.includes('/v1beta/models/'), byId.gemini?.requestUrl)
+}
+
+console.log('\n== 带 /v1 前缀的地址真的能用 ==')
+{
+  nextChunks = PLAIN
+  const models = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
+  check('GET /v1/models', models.status === 200, String(models.status))
+  const chat = await keyPost('/v1/chat/completions', firstKey, { messages: [{ role: 'user', content: 'hi' }] })
+  check('POST /v1/chat/completions', chat.status === 200, String(chat.status))
+  const responses = await keyPost('/v1/responses', firstKey, { input: 'hi' })
+  check('POST /v1/responses', responses.status === 200, String(responses.status))
+  const messages = await fetch(`${API}/v1/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': firstKey },
+    body: JSON.stringify({ max_tokens: 64, messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  check('POST /v1/messages', messages.status === 200, String(messages.status))
+  const doubled = await fetch(`${API}/anthropic/v1/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': firstKey },
+    body: JSON.stringify({ max_tokens: 64, messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  check('POST /anthropic/v1/messages（前缀叠加）', doubled.status === 200, String(doubled.status))
+  const gemini = await fetch(`${API}/v1beta/models/-:generateContent`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': firstKey },
+    body: JSON.stringify({ contents: [{ role: 'user', parts: [{ text: 'hi' }] }] }),
+  })
+  check('POST /v1beta/models/-:generateContent', gemini.status === 200, String(gemini.status))
 }
 
 console.log('\n== 模型目录不带区域前缀 ==')

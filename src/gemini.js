@@ -20,9 +20,21 @@ import { callModel } from './call.js'
 import { withStatus } from './backend.js'
 import { abortSignalOf, splitImageUrl } from './openai-chat.js'
 
-/** 从路径里拆出 `{model, action}`；不是 Gemini 路径时返回 undefined。 */
+/**
+ * 从路径里拆出 `{model, action}`；不是 Gemini 路径时返回 undefined。
+ *
+ * 接受的前缀比官方多那么几个，因为各家 SDK 拼法不同：
+ *
+ *   `/v1beta/models/<m>:generateContent`      Google 官方
+ *   `/v1/models/<m>:generateContent`          有的客户端版本写死 v1
+ *   `/anthropic/v1beta/models/<m>:…`          客户端把 base 填成了带 /anthropic 的
+ *   `/v1/v1beta/models/<m>:…`                 照抄文档时把 /v1 一起带上了
+ *
+ * 后面两种在真实客户端里都出现过，与其让用户自己删前缀，不如全都收下 —— 它们
+ * 语义相同，多认一条只是少一次 404。
+ */
 export function parseGeminiPath(pathname) {
-  const match = /^\/(?:v1beta|v1)\/models\/(.+?)(?::(generateContent|streamGenerateContent))\/?$/u.exec(pathname)
+  const match = /^(?:\/(?:v1beta|v1|anthropic|openai|gemini))*\/models\/(.+?)(?::(generateContent|streamGenerateContent))\/?$/u.exec(pathname)
   if (match === null) return undefined
   return { model: decodeURIComponent(match[1]), action: match[2] }
 }
