@@ -66,7 +66,14 @@ export const PROTOCOLS = [
  * @param origin 例如 `http://127.0.0.1:9055`
  */
 export function describeEndpoints(origin) {
-  const root = `${origin}${PREFIX}`
+  /*
+   * **根 = DSH 自己的地址，不带任何自定义前缀。**
+   *
+   * 协议端点直接挂在 `/v1/...`，因为那是所有客户端默认期待的形状。让用户填
+   * `http://127.0.0.1:9055/workbuddy-gateway` 是没必要的负担，而且有些客户端
+   * 不接受带路径的 base URL。旧前缀仍作为别名保留，已填过它的不会失效。
+   */
+  const root = origin
   const endpoints = PROTOCOLS.map((protocol) => ({
     id: protocol.id,
     name: protocol.name,

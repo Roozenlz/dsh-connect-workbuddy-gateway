@@ -224,7 +224,7 @@ export async function handleResponses(req, res, env) {
         })
         if (item.type !== 'reasoning' && item.status === 'in_progress') item.status = 'incomplete'
       }
-      emit({ type: 'response.output_item.done', output_index: index, item: { ...item } })
+      emit({ type: 'response.output_item.done', output_index: index, item: withoutInternals(item) })
     }
   }
 
@@ -239,7 +239,7 @@ export async function handleResponses(req, res, env) {
         : { id: `msg_${randomId()}`, type: 'message', role: 'assistant', status: 'in_progress', content: [] }
       /* 先登记再宣告：宣告之后就能接收 delta。 */
       items.set(index, item)
-      emit({ type: 'response.output_item.added', output_index: index, item: { ...item } })
+      emit({ type: 'response.output_item.added', output_index: index, item: withoutInternals(item) })
       return { index, item }
     }
 
@@ -336,10 +336,18 @@ export async function handleResponses(req, res, env) {
       if (event.type === 'tool-call') {
         sawToolCalls = true
         /*
-         * 工具调用：同一个 call id 的后续 delta 是参数增量。首个 delta（带 name）
-         * 开启新 item，其余追加到它上面。
+         * 工具调用：按**上游 index** 归组。
+         *
+         * 只按 call_id 找是不可靠的：OpenAI 的 delta 只在首片带 id，之后的分片
+         * id 缺席；多个并行调用在首片之后都表现为「无 id 的分片」，按 id 找不到
+         * 就会新建 item 或拼错位置。index 是上游给出的稳定分组键。
          */
-        let slot = [...items.entries()].find(([, item]) => item.type === 'function_call' && item.call_id === event.id)
+        let slot
+        if (Number.isInteger(event.index)) {
+          slot = [...items.entries()].find(([, item]) => item.type === 'function_call' && item.__upstreamIndex === event.index)
+        } else if (event.id !== undefined) {
+          slot = [...items.entries()].find(([, item]) => item.type === 'function_call' && item.call_id === event.id)
+        }
         if (slot === undefined) {
           const index = items.size
           const item = {
@@ -349,9 +357,10 @@ export async function handleResponses(req, res, env) {
             name: event.name ?? '',
             arguments: '',
             status: 'in_progress',
+            ...(Number.isInteger(event.index) ? { __upstreamIndex: event.index } : {}),
           }
           items.set(index, item)
-          emit({ type: 'response.output_item.added', output_index: index, item: { ...item } })
+          emit({ type: 'response.output_item.added', output_index: index, item: withoutInternals(item) })
           slot = [index, item]
         }
         const [index, item] = slot
@@ -439,6 +448,22 @@ export async function handleResponses(req, res, env) {
   } finally {
     sse.end()
   }
+}
+
+/**
+ * 去掉只给插件内部用的字段（`__` 前缀）。
+ *
+ * item 在插件里要记 `__upstreamIndex` 才能把交错的 delta 归到正确的调用上，但
+ * 那个字段**不能出现在任何事件里** —— 客户端按 schema 严格校验，多一个未知字段
+ * 同样会被判为格式不兼容。
+ */
+function withoutInternals(item) {
+  const out = {}
+  for (const [key, value] of Object.entries(item)) {
+    if (key.startsWith('__')) continue
+    out[key] = value
+  }
+  return out
 }
 
 /**

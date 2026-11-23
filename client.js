@@ -52,6 +52,10 @@ window.__ModuleLoader__.load({
         pickAccount: '选择账号',
         allAccounts: '全部账号（默认）',
         groupDefault: '默认账号（跟随插件设置）',
+        unavailable: '个账号当前不可用',
+        unavailableHint: '上游判定这些账号暂时不能用，已从可勾选列表移除；恢复后会自动回来。',
+        healthFresh: '账号状态读取于',
+        healthStale: '尚未读到上游账号状态',
         selected: '已选',
         noneSelected: '还没有勾选任何模型，这把 key 暂时不能用。',
         willExpose: '客户端会看到',
@@ -103,6 +107,10 @@ window.__ModuleLoader__.load({
         pickAccount: 'Pick an account',
         allAccounts: 'All accounts (default)',
         groupDefault: 'Default account (follows the plugin)',
+        unavailable: 'accounts unavailable right now',
+        unavailableHint: 'The upstream marks these accounts unusable, so they are not offered for ticking. They return automatically once healthy.',
+        healthFresh: 'Account state read at',
+        healthStale: 'No upstream account state yet',
         selected: 'selected',
         noneSelected: 'No models ticked yet, so this key cannot be used.',
         willExpose: 'The client will see',
@@ -181,6 +189,8 @@ window.__ModuleLoader__.load({
 .wbg-dot-on{background:var(--dsw-alias-state-success-primary,#1a7f37);box-shadow:0 0 0 3px color-mix(in srgb,var(--dsw-alias-state-success-primary,#1a7f37) 18%,transparent)}
 .wbg-badge{font-size:11px;padding:1.5px 8px;border-radius:999px;border:1px solid var(--dsw-alias-border-l1,#e3e3e3);color:var(--dsw-alias-label-secondary,#666);white-space:nowrap}
 .wbg-badge-count{color:var(--dsw-alias-brand-primary,#2f6df6);border-color:currentColor}
+.wbg-badge-global{color:var(--dsw-alias-brand-primary,#2f6df6);border-color:currentColor}
+.wbg-badge-cn{color:var(--dsw-alias-state-success-primary,#1a7f37);border-color:currentColor}
 .wbg-secret{display:flex;align-items:center;gap:8px;background:var(--dsw-alias-bg-layer-2,#f6f6f6);border:1px solid var(--dsw-alias-border-l1,#eee);border-radius:8px;padding:8px 11px}
 .wbg-secret code{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary,#666);letter-spacing:.3px}
 .wbg-secret-live code{color:var(--dsw-alias-label-primary,#1a1a1a);letter-spacing:0}
@@ -190,7 +200,7 @@ window.__ModuleLoader__.load({
 .wbg-picker-head{position:sticky;top:0;z-index:1;display:flex;gap:8px;align-items:center;padding:8px 10px;background:var(--dsw-alias-bg-layer-2,#f6f6f6);border-bottom:1px solid var(--dsw-alias-border-l1,#eee)}
 .wbg-group{border-top:1px solid var(--dsw-alias-border-l1,#eee)}
 .wbg-group:first-child{border-top:none}
-.wbg-group-title{display:flex;align-items:center;gap:8px;padding:7px 10px;font-size:11.5px;font-weight:600;color:var(--dsw-alias-label-secondary,#666);background:var(--dsw-alias-bg-layer-2,#fafafa)}
+      .wbg-group-title{display:flex;align-items:center;gap:8px;padding:7px 10px;font-size:11.5px;font-weight:600;color:var(--dsw-alias-label-secondary,#666);background:var(--dsw-alias-bg-layer-2,#fafafa)}
 .wbg-opt{display:flex;align-items:center;gap:9px;padding:6px 10px 6px 22px;cursor:pointer;border-radius:6px}
 .wbg-opt:hover{background:var(--dsw-alias-bg-layer-2,#f6f6f6)}
 .wbg-opt-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px}
@@ -322,31 +332,60 @@ window.__ModuleLoader__.load({
         [selected],
       )
 
+      /*
+       * 分组顺序与标题。
+       *
+       * 用户反馈「默认账号把国内的国际的都放到一起了，不便区分」——所以默认账号也
+       * **按区域拆成两组**。分组键带上区域前缀（`cn:` / `global:`），于是同一个
+       * 「默认账号」在两个区是两个独立分组，各列各的模型。
+       *
+       * 不可用账号（上游限流/停权）由 `/state` 的 `available` 表筛掉了，所以这里
+       * 不需要再过滤一次；`unavailable` 只在页头提示，避免用户以为账号丢了。
+       */
       const groups = useMemo(() => {
         const needle = query.trim().toLowerCase()
-        const match = (model) => needle === '' || model.modelId.toLowerCase().includes(needle) || (model.displayName ?? '').toLowerCase().includes(needle)
-        const byAccount = new Map()
+        const match = (model) => needle === ''
+          || model.modelId.toLowerCase().includes(needle)
+          || (model.displayName ?? '').toLowerCase().includes(needle)
+
+        const byGroup = new Map()
+        const push = (groupKey, row) => {
+          if (!byGroup.has(groupKey)) byGroup.set(groupKey, [])
+          byGroup.get(groupKey).push(row)
+        }
+        const accountById = new Map(accounts.map((account) => [account.id, account]))
+
         for (const model of available) {
           if (!match(model)) continue
-          const accountKey = ''
-          if (!byAccount.has(accountKey)) byAccount.set(accountKey, [])
-          byAccount.get(accountKey).push({ ...model, accountId: '' })
-        }
-        for (const account of accounts) {
-          for (const model of available) {
-            if (!match(model)) continue
-            if (model.region !== account.region) continue
-            if (!byAccount.has(account.id)) byAccount.set(account.id, [])
-            byAccount.get(account.id).push({ ...model, accountId: account.id, accountName: account.name })
+          if ((model.accountId ?? '') === '') {
+            /* 默认账号：按区域分开。 */
+            push(`default:${model.region ?? 'cn'}`, { ...model, accountId: '' })
+            continue
           }
+          const account = accountById.get(model.accountId)
+          push(
+            `account:${model.accountId}`,
+            { ...model, accountName: account?.name ?? model.accountName ?? model.accountId.slice(0, 8) },
+          )
         }
-        return [...byAccount.entries()]
-          .filter(([, models]) => models.length > 0)
-          .map(([accountId, models]) => ({
-            accountId,
-            accountName: accountId === '' ? null : accounts.find((account) => account.id === accountId)?.name ?? accountId.slice(0, 8),
-            models,
-          }))
+
+        const order = { cn: 0, global: 1 }
+        return [...byGroup.entries()]
+          .map(([groupKey, models]) => {
+            const [kind, id] = groupKey.split(':')
+            const region = kind === 'default' ? id : (accountById.get(id)?.region ?? 'cn')
+            return {
+              groupKey,
+              kind,
+              region,
+              accountId: kind === 'default' ? '' : id,
+              accountName: kind === 'default' ? null : (accountById.get(id)?.name ?? id.slice(0, 8)),
+              models,
+              /* 排序：默认账号在前，然后国内版、国际版。 */
+              sort: (kind === 'default' ? 0 : 10) + (order[region] ?? 9),
+            }
+          })
+          .sort((a, b) => (a.sort - b.sort) || String(a.accountName ?? '').localeCompare(String(b.accountName ?? '')))
       }, [available, accounts, query])
 
       const toggle = (accountId, model) => {
@@ -408,11 +447,12 @@ window.__ModuleLoader__.load({
         h('div', { className: 'wbg-picker' },
           groups.length === 0
             ? h('p', { className: 'wbg-hint', style: { padding: 12 } }, t.noneSelected)
-            : groups.map((group) => h('div', { key: group.accountId === '' ? '__default' : group.accountId, className: 'wbg-group' },
+            : groups.map((group) => h('div', { key: group.groupKey, className: 'wbg-group' },
               h('div', { className: 'wbg-group-title' },
-                h('span', null, group.accountId === '' ? t.groupDefault : group.accountName),
-                group.accountId === '' ? null : h('span', { className: 'wbg-badge' },
-                  accounts.find((account) => account.id === group.accountId)?.region === 'global' ? t.regionGlobal : t.regionCn),
+                h('span', null, group.kind === 'default' ? t.groupDefault : group.accountName),
+                /* 区域徽标：默认账号也带，用户才分得清国内的与国外的。 */
+                h('span', { className: group.region === 'global' ? 'wbg-badge wbg-badge-global' : 'wbg-badge' },
+                  group.region === 'global' ? t.regionGlobal : t.regionCn),
                 h('span', { className: 'wbg-spacer' }),
                 h('span', { style: { fontWeight: 400 } }, `${group.models.filter((model) => selectedKeys.has(keyOf(group.accountId, model.modelId))).length}/${group.models.length}`),
               ),
@@ -675,6 +715,31 @@ window.__ModuleLoader__.load({
           ),
           h('div', null, endpoints.map((entry) => h(EndpointRow, { key: entry.id, entry, t }))),
           h('p', { className: 'wbg-caption', style: { marginTop: 2 } }, `${t.root}: ${state.baseUrl}`),
+        ),
+
+        /*
+         * 上游账号状态提示。
+         *
+         * 用户明确要求「账号不可用时从可勾选列表移除，并与上游保持同步」，所以
+         * 这里把「移除了几个、为什么、状态有多新」直接说出来 —— 否则用户只会
+         * 发现某个账号凭空消失。
+         */
+        (state.unavailableAccounts?.length ?? 0) === 0 ? null : h('div', { className: 'wbg-alert wbg-alert-warn' },
+          h('span', { className: 'wbg-alert-icon', 'aria-hidden': true }, '!'),
+          h('div', { className: 'wbg-alert-body' },
+            h('div', null, `${state.unavailableAccounts.length} ${t.unavailable}`),
+            h('p', { className: 'wbg-caption', style: { margin: '2px 0 6px' } }, t.unavailableHint),
+            h('div', { className: 'wbg-chips' },
+              state.unavailableAccounts.map((account) => h('span', {
+                key: `${account.region}:${account.id}`,
+                className: 'wbg-chip',
+                title: account.reason,
+              },
+                account.name === '' ? account.id.slice(0, 8) : account.name,
+                h('span', { className: 'wbg-caption' }, account.region === 'global' ? t.regionGlobal : t.regionCn),
+              )),
+            ),
+          ),
         ),
 
         h('div', { className: 'wbg-row' },

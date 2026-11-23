@@ -191,9 +191,13 @@ export async function handleChat(req, res, env) {
       }
       if (event.type === 'tool-call') {
         sawToolCalls = true
+        /*
+         * `index` 必须是**上游的**那个。硬编码 0 会让并行的多个工具调用挤进同一
+         * 个槽位，客户端把它们拼成一个参数串，JSON 必然坏掉。
+         */
         sse.data(envelope({
           tool_calls: [{
-            index: 0,
+            index: Number.isInteger(event.index) ? event.index : 0,
             ...(event.id === undefined ? {} : { id: event.id }),
             type: 'function',
             ...(event.name === undefined || event.name === '' ? {} : { function: { name: event.name, arguments: event.argumentsDelta } }),

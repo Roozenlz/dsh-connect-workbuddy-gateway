@@ -56,22 +56,43 @@ export async function directModelsByRegion(env) {
  *
  * 每一项都带上「要写进勾选清单」的全部字段，于是界面勾一下就能存下完整信息
  * （上下文、输出上限、推理档、模态），日后展示不需要再查一遍上游。
+ *
+ * @param env 宿主环境
+ * @param accounts 全部账号（含不可用的，用于取区域）
+ * @param usableAccounts 只含**上游判定可用**的账号；界面不该让用户勾一个
+ *                      当下连不上的账号。省略时退化为全部账号。
  */
-export async function catalogForSettings(env, accounts) {
+export async function catalogForSettings(env, accounts, usableAccounts) {
   const entries = await collectModels(env)
   const pool = entries.length > 0 ? entries : await directModelsByRegion(env)
-  return pool.map((entry) => ({
-    accountId: '',
-    region: entry.region,
-    modelId: entry.id,
-    displayName: entry.name ?? entry.id,
-    ...(entry.contextWindow === undefined ? {} : { contextWindow: entry.contextWindow }),
-    ...(entry.maxTokens === undefined ? {} : { maxTokens: entry.maxTokens }),
-    reasoningEfforts: effortsOf(entry.reasoning),
-    inputModalities: modalitiesOf(entry.inputModalities),
-    /* 供界面显示：模型属于哪个区域。 */
-    provider: entry.provider,
-  }))
+  const usableIds = usableAccounts === undefined
+    ? undefined
+    : new Set(usableAccounts.map((account) => account.id))
+
+  const out = []
+  for (const entry of pool) {
+    const common = {
+      region: entry.region,
+      modelId: entry.id,
+      displayName: entry.name ?? entry.id,
+      ...(entry.contextWindow === undefined ? {} : { contextWindow: entry.contextWindow }),
+      ...(entry.maxTokens === undefined ? {} : { maxTokens: entry.maxTokens }),
+      reasoningEfforts: effortsOf(entry.reasoning),
+      inputModalities: modalitiesOf(entry.inputModalities),
+      provider: entry.provider,
+    }
+
+    /* 默认账号那条：`accountId: ''`，走宿主通道。 */
+    out.push({ ...common, accountId: '' })
+
+    /* 具名账号：只为**可用**的账号生成候选。 */
+    for (const account of Array.isArray(accounts) ? accounts : []) {
+      if (account.region !== entry.region) continue
+      if (usableIds !== undefined && !usableIds.has(account.id)) continue
+      out.push({ ...common, accountId: account.id, accountName: account.name })
+    }
+  }
+  return out
 }
 
 /** 推理档列表：adapter 报了就用它的，否则给一组保守的常用档位。 */

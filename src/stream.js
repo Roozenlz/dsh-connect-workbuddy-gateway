@@ -11,17 +11,32 @@
  */
 
 /** 宿主 StreamChunk 流 → 规范化事件流。 */
+/**
+ * 宿主 StreamChunk → 规范化事件。
+ *
+ * **`index` 必须带出去。** 上游按 `index` 区分同一个响应里的多个工具调用；
+ * 丢掉它，两个并行的 tool call 就会被拼成同一个 block 的 arguments，
+ * 客户端解出来的 JSON 必然坏掉（实测：Claude 报
+ * `ToolSearch was called with input that could not be parsed as JSON`,
+ * `You sent (first 1 of 1 bytes): }`）。
+ */
 export async function* fromHostChunks(chunks) {
   for await (const chunk of chunks) {
     switch (chunk.type) {
       case 'text-delta':
-        if (chunk.text !== '') yield { type: 'text', text: chunk.text }
+        if (chunk.text !== '') yield { type: 'text', index: chunk.index, text: chunk.text }
         break
       case 'reasoning-delta':
-        if (chunk.text !== '') yield { type: 'reasoning', text: chunk.text }
+        if (chunk.text !== '') yield { type: 'reasoning', index: chunk.index, text: chunk.text }
         break
       case 'tool-call-delta':
-        yield { type: 'tool-call', id: chunk.id, name: chunk.name, argumentsDelta: chunk.argumentsDelta ?? '' }
+        yield {
+          type: 'tool-call',
+          index: chunk.index,
+          id: chunk.id,
+          name: chunk.name,
+          argumentsDelta: chunk.argumentsDelta ?? '',
+        }
         break
       case 'usage':
         yield { type: 'usage', usage: chunk.usage }
@@ -225,14 +240,23 @@ export async function collect(events) {
          */
         throw event.error
       case 'tool-call': {
-        const key = event.id
+        /*
+         * 归并键优先用上游的 `index`，其次 id。
+         *
+         * 为什么不能只用 id：OpenAI 的 delta 只在首片带 id，后续分片 id 缺席；
+         * 而多个并行调用在首片之后都表现为「无 id 的分片」。只按 id 归并，
+         * 后一个调用的参数会被拼进前一个 —— 客户端解出来就是坏 JSON。
+         */
+        const key = Number.isInteger(event.index) ? `i${event.index}` : `id${event.id ?? 0}`
         let current = tools.get(key)
         if (current === undefined) {
-          current = { id: event.id, name: event.name ?? '', arguments: '' }
+          current = { id: event.id ?? `call_${key}`, name: event.name ?? '', arguments: '' }
           tools.set(key, current)
           toolOrder.push(key)
+        } else {
+          if (event.id !== undefined && event.id !== null && current.id.startsWith('call_')) current.id = event.id
+          if (event.name !== undefined && event.name !== '' && current.name === '') current.name = event.name
         }
-        if (event.name !== undefined && event.name !== '') current.name = event.name
         current.arguments += event.argumentsDelta ?? ''
         break
       }

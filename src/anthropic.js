@@ -161,8 +161,18 @@ export async function handleMessages(req, res, env) {
     sse.event('ping', { type: 'ping' })
 
     /*
-     * Anthropic 的流要严格按「每个 block 先 start、再 delta、再 stop」走。这里
-     * 按需开新块：文本与思考各自一段，工具调用一调用一块；块索引单调递增。
+     * Anthropic 的流要严格按「每个 block 先 start、再 delta、再 stop」走，且块
+     * 索引单调递增、不能回退。
+     *
+     * **工具参数必须按上游的 index 分组。** 一个响应里可以有多个并行的工具调用，
+     * 上游用 `index` 区分它们；把它们拼进同一个 block，客户端拼出的就是
+     * `{"a":1}y:2}` 这种坏 JSON（实测报错：
+     * `ToolSearch was called with input that could not be parsed as JSON`,
+     * `You sent (first 1 of 1 bytes): }`）。
+     *
+     * OpenAI 允许各 index 的 delta 交错到达，而 Anthropic 的 block 不能交错，所以
+     * 这里**把工具参数缓冲起来，在 finish 时按 index 顺序整块输出**。这牺牲了
+     * 工具参数的逐字流式（几乎没人依赖），换来 100% 的正确性。
      */
     let index = -1
     let openKind
@@ -177,6 +187,9 @@ export async function handleMessages(req, res, env) {
       sse.event('content_block_start', { type: 'content_block_start', index, content_block: block })
       return index
     }
+
+    /** 上游 tool index → `{ id, name, arguments }`，按首次出现顺序。 */
+    const toolCalls = new Map()
 
     let sawToolCalls = false
     for await (const event of callModel(env.ctx, env, target, request, signal)) {
@@ -198,16 +211,18 @@ export async function handleMessages(req, res, env) {
       }
       if (event.type === 'tool-call') {
         sawToolCalls = true
-        if (event.id !== undefined && event.name !== undefined && event.name !== '') {
-          closeBlock()
-          openBlock({ type: 'tool_use', id: event.id, name: event.name, input: {} })
-        }
-        if (event.argumentsDelta !== '') {
-          sse.event('content_block_delta', {
-            type: 'content_block_delta',
-            index: index < 0 ? 0 : index,
-            delta: { type: 'input_json_delta', partial_json: event.argumentsDelta },
+        /* 按上游 index 分组；没有 index 时按 id 归档，再不行退到 0。 */
+        const key = Number.isInteger(event.index) ? event.index : (event.id ?? 0)
+        const existing = toolCalls.get(key)
+        if (existing === undefined) {
+          toolCalls.set(key, {
+            id: event.id ?? `call_${key}`,
+            name: event.name ?? '',
+            arguments: event.argumentsDelta ?? '',
           })
+        } else {
+          if (typeof event.name === 'string' && event.name !== '' && existing.name === '') existing.name = event.name
+          existing.arguments += event.argumentsDelta ?? ''
         }
         continue
       }
@@ -226,6 +241,18 @@ export async function handleMessages(req, res, env) {
       }
       if (event.type === 'finish') {
         closeBlock()
+        /* 收尾时把缓冲的工具调用整块发出去，顺序与上游一致。 */
+        for (const [key, call] of [...toolCalls.entries()].sort((a, b) => (a[0] > b[0] ? 1 : a[0] < b[0] ? -1 : 0))) {
+          openBlock({ type: 'tool_use', id: call.id, name: call.name || `tool_${key}`, input: {} })
+          if (call.arguments !== '') {
+            sse.event('content_block_delta', {
+              type: 'content_block_delta',
+              index,
+              delta: { type: 'input_json_delta', partial_json: call.arguments },
+            })
+          }
+          closeBlock()
+        }
         sse.event('message_delta', {
           type: 'message_delta',
           delta: { stop_reason: anthropicStopReason(event.reason, sawToolCalls), stop_sequence: null },

@@ -25,6 +25,7 @@ import { buildCatalog, safeSuffixOf } from './catalog.js'
 import { allAccounts } from './accounts.js'
 import { regionOfProvider, providerOfRegion } from './resolve.js'
 import { describeEndpoints, stripApiPrefix } from './endpoints.js'
+import { allPoolHealth, poolStateMtime } from './health.js'
 
 const PREFIX = '/workbuddy-gateway'
 const ADMIN_PREFIX = '/plugins/dsh-workbuddy-gateway'
@@ -35,15 +36,59 @@ const ADMIN_PREFIX = '/plugins/dsh-workbuddy-gateway'
  * @param env `{config, logger, providers}`；`providers` 每次请求现读
  * @returns 释放函数
  */
+/**
+ * 注册路由。
+ *
+ * **对外 API 直接挂在根路径上**（`/v1/chat/completions` 这种），因为那是所有
+ * OpenAI / Anthropic / Gemini 客户端默认期待的形状 —— 让用户填一个带
+ * `/workbuddy-gateway` 的 base 是没必要的负担，而且有些客户端根本不接受带路径
+ * 前缀的 base URL。
+ *
+ * 但根路径不能整段接管：DSH 自己占着 `/api`、`/plugins` 以及前端静态资源。所以
+ * 这里只精确匹配**协议自己的那几个路径**，不注册宽 prefix，避免和宿主抢请求。
+ * 旧前缀 `/workbuddy-gateway` 保留为别名，已经填了它的客户端不会失效。
+ *
+ * @param ctx 已注入 `webServer` 的上下文
+ * @param env `{config, logger, providers}`
+ * @returns 释放函数
+ */
 export function registerRoutes(ctx, env) {
   const disposers = []
-  disposers.push(ctx.webServer.register({
-    kind: 'prefix',
-    path: PREFIX,
-    handler: (req, res) => {
-      void dispatchApi(req, res, ctx, env)
-    },
-  }))
+  /*
+   * 两个入口：根路径（协议默认形状）与旧前缀（兼容）。
+   *
+   * 根路径用 `exact` 逐条注册而不是一个大 prefix —— 这样完全不会碰到 DSH 的
+   * `/api`、`/plugins`、前端资源。`/v1beta/models/*:generateContent` 这种带冒号
+   * 的动态路径没法用 exact 表达，所以给 `/v1beta` 与 `/v1/models/` 各注册一个
+   * prefix，范围足够窄。
+   */
+  const API_ROOTS = [
+    /* 协议端点：逐条精确。 */
+    '/v1/chat/completions',
+    '/v1/responses',
+    '/v1/messages',
+    '/v1/messages/count_tokens',
+    '/v1/models',
+    '/v1/accounts',
+    '/v1/models/list',
+    /* Gemini 的模型动作带冒号，只能用前缀。 */
+    { prefix: '/v1beta' },
+    /* 兼容：老 base URL 带 /workbuddy-gateway。 */
+    { prefix: PREFIX },
+  ]
+
+  for (const entry of API_ROOTS) {
+    const route = typeof entry === 'string'
+      ? { kind: 'exact', path: entry }
+      : { kind: 'prefix', path: entry.prefix }
+    disposers.push(ctx.webServer.register({
+      ...route,
+      handler: (req, res) => {
+        void dispatchApi(req, res, ctx, env)
+      },
+    }))
+  }
+
   disposers.push(ctx.webServer.register({
     kind: 'prefix',
     path: ADMIN_PREFIX,
@@ -60,7 +105,7 @@ export function registerRoutes(ctx, env) {
 
 async function dispatchApi(req, res, ctx, env) {
   const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-  const path = normalizePath(url.pathname, PREFIX)
+  const path = normalizeApiPath(url.pathname)
   const method = req.method ?? 'GET'
 
   const keyEntry = authenticate(req.headers, url)
@@ -284,16 +329,43 @@ async function dispatchAdmin(req, res, ctx, env) {
   }
 }
 
-/** 设置页需要的一次性快照：可选模型全表、账号、key 表、四种协议的准确地址。 */
+/**
+ * 设置页需要的一次性快照：可选模型全表、账号（含可用性）、key 表、协议地址。
+ *
+ * **可用性是活的**：每次读 `/state` 都重新读上游插件的池状态，所以账号被限流后
+ * 刷新设置页就能看到它变灰、并且不再出现在可勾选列表里。用户要的是「跟上游保持
+ * 同步」，而不是一份启动时拍下来的快照。
+ */
 async function adminState(ctx, env) {
   const config = readConfig()
   const origin = originOf(ctx)
   const accounts = publicAccounts(env)
-  /* 勾选界面的候选：全量目录 × 每个账号，用户从中挑。 */
-  const available = await catalogForSettings(env, accounts)
+  const regions = env.config.enableGlobal === false ? ['cn'] : ['cn', 'global']
+  const health = allPoolHealth(regions)
+
+  /* 只把「上游判定现在可用」的账号算进候选；不可用的单独列出供说明。 */
+  const usable = accounts.filter((account) => health.get(account.id)?.available !== false)
+  const unavailable = accounts
+    .filter((account) => health.get(account.id)?.available === false)
+    .map((account) => {
+      const state = health.get(account.id)
+      return {
+        id: account.id,
+        name: account.name,
+        region: account.region,
+        outcome: state?.outcome ?? 'unknown',
+        reason: state?.reason ?? '',
+        ...(state?.retryAtMs === undefined ? {} : { retryAtMs: state.retryAtMs }),
+      }
+    })
+
+  /* 勾选界面的候选：全量目录 × 每个**可用**账号。 */
+  const available = await catalogForSettings(env, accounts, usable)
+
   return {
     origin,
-    baseUrl: `${origin}${PREFIX}`,
+    /* 根地址就是 DSH 自己的地址，不带自定义前缀。 */
+    baseUrl: origin,
     endpoints: describeEndpoints(origin).endpoints,
     configPath: configPathOf(),
     providers: env.providers().map((provider) => ({
@@ -301,15 +373,28 @@ async function adminState(ctx, env) {
       region: regionOfProvider(provider) ?? null,
       label: regionOfProvider(provider) === 'global' ? 'WorkBuddy 国际版' : 'WorkBuddy 国内版',
     })),
-    accounts: accounts.map((account) => ({
-      region: account.region,
-      id: account.id,
-      name: account.name === '' ? account.id.slice(0, 8) : account.name,
-      enterprise: account.enterprise,
-      safeSuffix: account.safeSuffix,
-    })),
+    accounts: accounts.map((account) => {
+      const state = health.get(account.id)
+      return {
+        region: account.region,
+        id: account.id,
+        name: account.name === '' ? account.id.slice(0, 8) : account.name,
+        enterprise: account.enterprise,
+        safeSuffix: account.safeSuffix,
+        available: state?.available !== false,
+        ...(state?.outcome === undefined ? {} : { outcome: state.outcome }),
+        ...(state?.reason === undefined ? {} : { reason: state.reason }),
+        ...(state?.retryAtMs === undefined ? {} : { retryAtMs: state.retryAtMs }),
+      }
+    }),
+    unavailableAccounts: unavailable,
     available,
     keys: publicKeys(config, env),
+    health: {
+      stateFileMtime: poolStateMtime(regions),
+      usableAccounts: usable.length,
+      unavailableAccounts: unavailable.length,
+    },
     defaults: {
       dsh: describeSelection(defaultSelectionOf(ctx)),
       session: describeSelection(sessionSelectionOf(ctx)),
@@ -343,7 +428,26 @@ function publicKeys(config, env) {
   }))
 }
 
-/** 对外路径去前缀。 */
+/**
+ * 把请求路径归一到「协议路由」那一层。
+ *
+ * 两个入口的路径不同（根 `/v1/chat/completions` 与旧前缀
+ * `/workbuddy-gateway/v1/chat/completions`），归一到同一套路由表之后，下面的
+ * 分发逻辑只写一份。
+ *
+ * @param pathname 原始 pathname
+ */
+function normalizeApiPath(pathname) {
+  let path = pathname
+  /* 旧前缀先剥掉。 */
+  if (path === PREFIX) path = '/'
+  else if (path.startsWith(`${PREFIX}/`)) path = path.slice(PREFIX.length)
+  if (path === '') path = '/'
+  if (!path.startsWith('/')) path = `/${path}`
+  return path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path
+}
+
+/** 对外路径去前缀（管理接口用）。 */
 function normalizePath(pathname, prefix) {
   let path = pathname
   if (path.startsWith(prefix)) path = path.slice(prefix.length)

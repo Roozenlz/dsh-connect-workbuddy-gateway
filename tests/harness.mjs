@@ -158,6 +158,8 @@ function check(label, condition, detail) {
   console.log(`  FAIL ${label}${detail === undefined ? '' : ` — ${detail}`}`)
 }
 
+/* `ORIGIN` 是根（协议的默认形状）；`API` 是旧前缀别名，用于验证兼容性。 */
+const ORIGIN = origin
 const API = `${origin}/workbuddy-gateway`
 const ADMIN = `${origin}/plugins/dsh-workbuddy-gateway`
 
@@ -228,14 +230,38 @@ console.log('\n== 掩码必须是可安全放进 HTTP 头的 ASCII ==')
   check('不含 U+2026', !masked.includes('\u2026'), JSON.stringify(masked))
 }
 
-console.log('\n== 四种协议的准确地址 ==')
+console.log('\n== 四种协议的准确地址（无自定义前缀）==')
 {
   const state = await adminGet('/state')
   const byId = Object.fromEntries(state.body.endpoints.map((entry) => [entry.id, entry]))
   check('四条', state.body.endpoints.length === 4)
-  check('openai base 带 /v1', byId['openai-chat']?.baseUrl.endsWith('/workbuddy-gateway/v1'))
-  check('anthropic base 不带 /v1', byId.anthropic?.baseUrl.endsWith('/workbuddy-gateway'))
-  check('gemini base 到根', byId.gemini?.baseUrl.endsWith('/workbuddy-gateway'))
+  /*
+   * base URL 直接挂在 DSH 根地址上：不带 `/workbuddy-gateway`。
+   * 用户明确要求「后缀太长，去掉」。
+   */
+  check('openai base 到 /v1', /^http:\/\/[^/]+\/v1$/u.test(byId['openai-chat']?.baseUrl ?? ''), byId['openai-chat']?.baseUrl)
+  check('没有自定义前缀', !byId['openai-chat']?.baseUrl.includes('workbuddy-gateway'), byId['openai-chat']?.baseUrl)
+  check('anthropic base 是根', /^http:\/\/[^/]+$/u.test(byId.anthropic?.baseUrl ?? ''), byId.anthropic?.baseUrl)
+  check('anthropic 实际请求 /v1/messages', byId.anthropic?.requestUrl.endsWith('/v1/messages'), byId.anthropic?.requestUrl)
+  check('gemini base 是根', /^http:\/\/[^/]+$/u.test(byId.gemini?.baseUrl ?? ''), byId.gemini?.baseUrl)
+}
+
+console.log('\n== 根路径与旧前缀都能用 ==')
+{
+  nextChunks = PLAIN
+  /* 根路径：客户端默认形状。 */
+  const rootModels = await fetch(`${ORIGIN}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
+  check('根 /v1/models', rootModels.status === 200, String(rootModels.status))
+  const rootChat = await fetch(`${ORIGIN}/v1/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${firstKey}` },
+    body: JSON.stringify({ model: 'glm-5.3', messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  check('根 /v1/chat/completions', rootChat.status === 200, String(rootChat.status))
+
+  /* 旧前缀：已经填过它的客户端不该失效。 */
+  const legacyModels = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
+  check('旧前缀仍可用', legacyModels.status === 200, String(legacyModels.status))
 }
 
 console.log('\n== 模型列表只返回勾选的模型 ==')
@@ -585,6 +611,152 @@ console.log('\n== 上游异常中断必须发 response.failed，不能伪装成�
   })
   const chatText = await chatTruncated.text()
   check('Chat 断流带 error 帧', chatText.includes('"error"'), chatText.slice(-200))
+}
+
+console.log('\n== 并行工具调用必须按 index 分组（否则参数串坏 JSON）==')
+{
+  /*
+   * 真实故障：Claude 报
+   *   ToolSearch was called with input that could not be parsed as JSON.
+   *   You sent (first 1 of 1 bytes): }
+   * 根因是 `fromHostChunks` 丢掉了上游 chunk 的 `index`，两个并行调用的参数被
+   * 拼成同一个 block。这里用两个交错到达的调用验证每个协议都分得开。
+   */
+  const parallel = [
+    { type: 'block-start', index: 0, blockType: 'text' },
+    { type: 'text-delta', index: 0, text: '查一下' },
+    { type: 'block-end', index: 0, block: { type: 'text', text: '查一下' } },
+    /* 两个调用交错到达：这正是 OpenAI 允许、而 naive 实现会拼错的情形。 */
+    { type: 'tool-call-delta', index: 1, id: 'call_a', name: 'get_weather', argumentsDelta: '{"city":' },
+    { type: 'tool-call-delta', index: 2, id: 'call_b', name: 'get_time', argumentsDelta: '{"zone":' },
+    { type: 'tool-call-delta', index: 1, id: 'call_a', name: 'get_weather', argumentsDelta: '"北京"}' },
+    { type: 'tool-call-delta', index: 2, id: 'call_b', name: 'get_time', argumentsDelta: '"UTC"}' },
+    { type: 'usage', usage: { inputTokens: 20, outputTokens: 9 } },
+    { type: 'finish', reason: { kind: 'tool-calls' } },
+  ]
+
+  /* Chat 非流式：两个独立的 tool_calls，参数各自完整。 */
+  nextChunks = parallel
+  const chat = await keyPost('/v1/chat/completions', firstKey, {
+    model: 'glm-5.3',
+    messages: [{ role: 'user', content: '北京天气和时间' }],
+  })
+  const chatBody = await chat.json()
+  const calls = chatBody.choices?.[0]?.message?.tool_calls ?? []
+  check('Chat 有两个调用', calls.length === 2, JSON.stringify(calls.map((c) => c.id)))
+  check('第一个参数完整', calls[0]?.function?.arguments === '{"city":"北京"}', calls[0]?.function?.arguments)
+  check('第二个参数完整', calls[1]?.function?.arguments === '{"zone":"UTC"}', calls[1]?.function?.arguments)
+
+  /* Chat 流式：index 必须来自上游（1 和 2），且两个调用的分片能归到各自 index。 */
+  nextChunks = parallel
+  const chatStream = await keyPost('/v1/chat/completions', firstKey, {
+    model: 'glm-5.3',
+    stream: true,
+    messages: [{ role: 'user', content: '北京天气和时间' }],
+  })
+  const streamText = await chatStream.text()
+  const indexes = [...streamText.matchAll(/"tool_calls":\[\{"index":(\d+)/gu)].map((match) => Number(match[1]))
+  /* 交错到达是合法的：同一个 index 可以出现多次，但值只能来自 {1,2}。 */
+  check('流式 index 来自上游', indexes.length > 0 && indexes.every((value) => value === 1 || value === 2), JSON.stringify(indexes))
+  check('两个 index 都用到', new Set(indexes).size === 2, JSON.stringify([...new Set(indexes)]))
+
+  /* Anthropic：两个 tool_use block，各自 input_json_delta 完整。 */
+  nextChunks = parallel
+  const anthropic = await fetch(`${API}/v1/messages`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': firstKey },
+    body: JSON.stringify({ model: 'glm-5.3', max_tokens: 256, stream: true, messages: [{ role: 'user', content: '北京天气和时间' }] }),
+  })
+  const anthropicText = await anthropic.text()
+  const starts = [...anthropicText.matchAll(/"type":"tool_use","id":"(call_[ab])"/gu)].map((m) => m[1])
+  check('Anthropic 两个 tool_use', starts.length === 2, JSON.stringify(starts))
+  /*
+   * 把 SSE 里所有 input_json_delta 的 partial_json 收集起来，按 content block
+   * 的 index 分组。用真正的 JSON 解析而不是正则截断 —— 参数里有大量转义引号，
+   * 正则会在第一个 `\"` 处切错。
+   */
+  const anthropicEvents = (await import('./responses-spec.mjs')).parseSseEvents(anthropicText)
+  const argsByBlock = new Map()
+  for (const event of anthropicEvents) {
+    if (event.type !== 'content_block_delta') continue
+    const delta = event.delta ?? {}
+    if (delta.type !== 'input_json_delta') continue
+    const key = event.index
+    argsByBlock.set(key, (argsByBlock.get(key) ?? '') + String(delta.partial_json ?? ''))
+  }
+  check('参数分两个 block', argsByBlock.size === 2, JSON.stringify([...argsByBlock.keys()]))
+  const parsed = [...argsByBlock.values()]
+  check('两段各自可解析', parsed.every((piece) => { try { JSON.parse(piece); return true } catch { return false } }), JSON.stringify(parsed))
+  check('参数内容正确', parsed.sort().join('|') === '{"city":"北京"}|{"zone":"UTC"}', JSON.stringify(parsed))
+
+  /* Responses：两个 function_call item，参数各自完整。 */
+  nextChunks = parallel
+  const responses = await fetch(`${API}/v1/responses`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${firstKey}` },
+    body: JSON.stringify({ model: 'glm-5.3', input: '北京天气和时间' }),
+  })
+  const responsesBody = await responses.json()
+  const functionCalls = (responsesBody.output ?? []).filter((item) => item.type === 'function_call')
+  check('Responses 两个 function_call', functionCalls.length === 2, JSON.stringify(functionCalls.map((c) => c.call_id)))
+  check('参数各自完整', functionCalls.map((c) => c.arguments).join('|') === '{"city":"北京"}|{"zone":"UTC"}', JSON.stringify(functionCalls.map((c) => c.arguments)))
+  check('没有内部字段泄漏', functionCalls.every((c) => !Object.keys(c).some((key) => key.startsWith('__'))), JSON.stringify(functionCalls[0]))
+}
+
+console.log('\n== 不可用账号必须从可勾选列表移除 ==')
+{
+  /*
+   * 用户要求：上游判定账号不可用时，把它从可勾选模型列表里去掉，并与上游保持同步。
+   * 这里伪造一份池状态（`acct_pony` 限流未过期、`acct_cat` 限流但已过期），
+   * 验证只有真正不可用的那个被移出候选。
+   */
+  const { writeFileSync, mkdirSync } = await import('node:fs')
+  const { join } = await import('node:path')
+  const poolDir = process.env.DSH_HOME
+  mkdirSync(poolDir, { recursive: true })
+  const now = Date.now()
+  writeFileSync(join(poolDir, '.workbuddy-pool.cn.json'), JSON.stringify({
+    version: 1,
+    probes: {
+      /* 限流中，冷却还有一小时 → 不可用。 */
+      acct_pony: {
+        outcome: 'rate-limited',
+        atMs: now - 60000,
+        retryAtMs: now + 3600000,
+        message: '{"code":6004,"msg":"您的使用量已超出频率限制"}',
+        accountName: 'pony',
+      },
+      /* 限流但冷却已过 → 只是历史，账号现在可用。 */
+      acct_cat: {
+        outcome: 'rate-limited',
+        atMs: now - 7200000,
+        retryAtMs: now - 3600000,
+        message: 'old',
+        accountName: 'ฅ՞•ﻌ•՞ฅ',
+      },
+    },
+  }), 'utf8')
+
+  const state = await adminGet('/state')
+  const unavailableIds = (state.body.unavailableAccounts ?? []).map((account) => account.id)
+  check('限流未过期的被移除', unavailableIds.includes('acct_pony'), JSON.stringify(unavailableIds))
+  check('冷却已过的不算', !unavailableIds.includes('acct_cat'), JSON.stringify(unavailableIds))
+
+  /* 可勾选候选里不该出现不可用账号。 */
+  const candidateAccounts = new Set((state.body.available ?? []).map((row) => row.accountId))
+  check('候选里没有不可用账号', !candidateAccounts.has('acct_pony'), JSON.stringify([...candidateAccounts]))
+  check('候选里有可用账号', candidateAccounts.has('acct_cat'), JSON.stringify([...candidateAccounts]))
+  /* 默认账号那条永远在（它跟着插件走，不是某个具体账号）。 */
+  check('默认账号始终可选', candidateAccounts.has(''), JSON.stringify([...candidateAccounts]))
+
+  /* 账号表里仍然列出它，只是标成不可用 —— 用户要能看见「它去哪了」。 */
+  const listed = state.body.accounts.find((account) => account.id === 'acct_pony')
+  check('账号表仍列出', listed !== undefined)
+  check('标为不可用', listed?.available === false, JSON.stringify(listed))
+  check('带原因', typeof listed?.reason === 'string' && listed.reason.length > 0, listed?.reason)
+
+  /* 状态文件时间戳要报出来，用户能判断这份状态多新。 */
+  check('报出状态时间', typeof state.body.health?.stateFileMtime === 'number' && state.body.health.stateFileMtime > 0, JSON.stringify(state.body.health))
 }
 
 console.log('\n== OpenAI Chat 流式 + 工具 ==')
