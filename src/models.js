@@ -100,8 +100,13 @@ function modalitiesOf(inputModalities) {
  *   cc-switch          `display_name`（菜单显示名） + `id`（实际请求模型）
  */
 function describeModel(entry) {
-  const contextWindow = positive(entry.contextWindow)
-  const maxTokens = positive(entry.maxTokens)
+  const declaredContext = positive(entry.contextWindow)
+  const declaredOutput = positive(entry.maxTokens)
+  /* 上游没报就用默认值——缺席比给一个保守值更糟，见下面常量的注释。 */
+  const contextWindow = declaredContext ?? DEFAULT_CONTEXT_WINDOW
+  const maxTokens = declaredOutput ?? DEFAULT_MAX_OUTPUT
+  const contextWindowDefaulted = declaredContext === undefined
+  const maxTokensDefaulted = declaredOutput === undefined
   const modalities = Array.isArray(entry.inputModalities) ? entry.inputModalities : ['text']
   const images = modalities.includes('image')
   const efforts = Array.isArray(entry.reasoningEfforts) ? entry.reasoningEfforts : []
@@ -119,29 +124,50 @@ function describeModel(entry) {
     model: entry.modelId,
     ...(entry.region === undefined ? {} : { region: entry.region }),
 
-    ...(contextWindow === undefined ? {} : {
-      context_window: contextWindow,
-      contextWindow,
-      context_length: contextWindow,
-      max_input_tokens: contextWindow,
-      limit: { context: contextWindow, ...(maxTokens === undefined ? {} : { output: maxTokens }) },
-    }),
+    /*
+     * 上下文与输出上限：**永远给出数值**，上游没报就用默认值。
+     *
+     * 为什么必须给：cc-switch 与同类客户端把这两个值直接填进它自己的表单，字段
+     * 缺席的后果是那一栏空白、要用户手填——而用户并不知道该填多少。给一个保守的
+     * 默认值，至少表单是完整的、请求能发出去。
+     *
+     * 默认值的选择：上下文 128000（当今模型的常见下限），输出 8192（多数模型的
+     * 默认上限）。上游报了就用上游的，`*_defaulted` 标记说明这是估的。
+     */
+    context_window: contextWindow,
+    contextWindow,
+    context_length: contextWindow,
+    context_tokens: contextWindow,
+    max_context_tokens: contextWindow,
+    max_input_tokens: contextWindow,
+    limit: { context: contextWindow, output: maxTokens },
+    ...(contextWindowDefaulted ? { context_window_defaulted: true } : {}),
 
-    ...(maxTokens === undefined ? {} : {
-      max_output_tokens: maxTokens,
-      maxTokens,
-      max_completion_tokens: maxTokens,
-    }),
+    max_output_tokens: maxTokens,
+    maxTokens,
+    max_completion_tokens: maxTokens,
+    ...(maxTokensDefaulted ? { max_output_tokens_defaulted: true } : {}),
 
     input_modalities: modalities,
     supports_vision: images,
     supports_images: images,
+    /* 有的客户端把「能不能关掉思考」单独列一栏。 */
+    supports_reasoning: efforts.length > 0,
+    supports_thinking: efforts.length > 0,
 
     /* 推理能力：只声明「有哪些档」，不替客户端选。 */
     reasoning: efforts.length > 0,
-    ...(efforts.length === 0 ? {} : { reasoning_efforts: efforts, reasoningEffort: efforts }),
+    reasoning_efforts: efforts,
+    reasoningEffort: efforts,
   }
 }
+
+/*
+ * 默认值：客户端要这两个数字来填表单，缺席比给一个保守值更糟。
+ * 保守是为了不误导——报大了会让客户端把超长上下文发上去被上游拒绝。
+ */
+const DEFAULT_CONTEXT_WINDOW = 128000
+const DEFAULT_MAX_OUTPUT = 8192
 
 function positive(value) {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined
@@ -160,13 +186,15 @@ export function anthropicCatalog(catalog) {
   return {
     data: catalog.map((entry) => {
       const one = describeModel(entry)
+      /* 这里同样不给「缺席」留口子：Anthropic SDK 的 model 对象也有这两个字段。 */
       return {
         type: 'model',
         id: one.id,
         display_name: one.display_name,
         created_at: new Date(0).toISOString(),
-        ...(one.context_window === undefined ? {} : { context_window: one.context_window, max_input_tokens: one.context_window }),
-        ...(one.max_output_tokens === undefined ? {} : { max_output_tokens: one.max_output_tokens }),
+        context_window: one.context_window,
+        max_input_tokens: one.max_input_tokens,
+        max_output_tokens: one.max_output_tokens,
       }
     }),
     has_more: false,

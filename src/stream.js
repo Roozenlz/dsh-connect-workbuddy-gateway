@@ -7,6 +7,7 @@
  *   {type:'tool-call', id, name?, argumentsDelta}
  *   {type:'usage', usage}
  *   {type:'finish', reason}
+ *   {type:'failure', error}   上游失败或断流（代替 finish）
  */
 
 /** 宿主 StreamChunk 流 → 规范化事件流。 */
@@ -39,15 +40,26 @@ export async function* fromHostChunks(chunks) {
  *
  * `reasoning_content` 是 WorkBuddy 上游的思考字段（pi-ai 也按这个名字记录），
  * 与正文一样按 delta 转发。
+ *
+ * **读流失败也走 `failure` 事件，不 throw** —— 理由见 `call.js` 顶部。另外这里
+ * 会记住有没有发过 `finish`：上游把连接断在半路时，调用方必须知道这是失败，
+ * 而不是「一段没有 finish 的正常结束」。
  */
 export async function* fromOpenAiSse(body, signal) {
-  if (body === null) return
+  if (body === null) {
+    yield { type: 'failure', error: new Error('the upstream returned no response body') }
+    return
+  }
   const reader = body.getReader()
   const decoder = new TextDecoder()
   let carry = ''
+  let sawFinish = false
   try {
     for (;;) {
-      if (signal?.aborted === true) return
+      if (signal?.aborted === true) {
+        yield { type: 'failure', error: abortError() }
+        return
+      }
       const { done, value } = await reader.read()
       if (done) break
       carry += decoder.decode(value, { stream: true })
@@ -72,7 +84,19 @@ export async function* fromOpenAiSse(body, signal) {
         } catch {
           continue
         }
-        yield* fromOpenAiChunk(parsed)
+        /* 有的上游把错误放在 SSE 里而不是 HTTP 状态上。 */
+        if (parsed?.error !== undefined) {
+          const said = parsed.error?.message ?? (typeof parsed.error === 'string' ? parsed.error : 'the upstream reported an error')
+          const error = new Error(said)
+          error.code = 'upstream_error'
+          error.status = 502
+          yield { type: 'failure', error }
+          return
+        }
+        for (const event of fromOpenAiChunk(parsed)) {
+          if (event.type === 'finish') sawFinish = true
+          yield event
+        }
       }
       carry = carry.slice(start)
     }
@@ -81,15 +105,49 @@ export async function* fromOpenAiSse(body, signal) {
       const payload = tail.slice(5).trim()
       if (payload !== '' && payload !== '[DONE]') {
         try {
-          yield* fromOpenAiChunk(JSON.parse(payload))
+          for (const event of fromOpenAiChunk(JSON.parse(payload))) {
+            if (event.type === 'finish') sawFinish = true
+            yield event
+          }
         } catch {
           /* 尾部半帧：丢弃 */
         }
       }
     }
+    if (!sawFinish) {
+      yield { type: 'failure', error: truncatedError() }
+    }
+  } catch (error) {
+    yield { type: 'failure', error: readError(error, signal) }
   } finally {
-    reader.releaseLock?.()
+    try {
+      reader.releaseLock?.()
+    } catch {
+      /* 已释放 */
+    }
   }
+}
+
+function abortError() {
+  const error = new Error('the client cancelled the request')
+  error.code = 'ABORTED'
+  error.status = 499
+  return error
+}
+
+function truncatedError() {
+  const error = new Error('the upstream stream ended without a finish chunk')
+  error.code = 'upstream_truncated'
+  error.status = 502
+  return error
+}
+
+function readError(error, signal) {
+  if (signal?.aborted === true) return abortError()
+  const normalized = error instanceof Error ? error : new Error(String(error))
+  if (typeof normalized.status !== 'number') normalized.status = 502
+  if (normalized.code === undefined) normalized.code = 'upstream_stream_error'
+  return normalized
 }
 
 /** 一个 OpenAI chunk → 规范化事件。 */
@@ -160,6 +218,12 @@ export async function collect(events) {
       case 'reasoning':
         reasoning += event.text
         break
+      case 'failure':
+        /*
+         * 上游失败：**抛出**，不要返回部分结果。非流式调用的调用方据此回
+         * 非 200，而不是一个「内容只有前半截」的成功响应。
+         */
+        throw event.error
       case 'tool-call': {
         const key = event.id
         let current = tools.get(key)

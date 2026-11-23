@@ -215,6 +215,14 @@ export async function handleGenerate(req, res, env, parsed) {
         usage = event.usage
         continue
       }
+      if (event.type === 'failure') {
+        /* 上游失败：先刷出已缓冲的文本，再发一条 error 事件。 */
+        flush()
+        const failure = failureOf(event.error)
+        sse.data({ error: { code: failure.status, message: failure.message, status: geminiStatus(failure.status) } })
+        sse.end()
+        return
+      }
       if (event.type === 'finish') {
         flush({ finishReason: geminiFinishReason(event.reason, sawToolCalls) })
       }
@@ -278,14 +286,19 @@ function safeJson(text) {
 /** 模型目录（Gemini 形状）。 */
 export function geminiCatalog(entries) {
   return {
-    models: entries.map((entry) => ({
-      name: `models/${entry.id}`,
-      displayName: entry.name ?? entry.id,
-      description: '',
-      ...(entry.contextWindow === undefined ? {} : { inputTokenLimit: entry.contextWindow }),
-      ...(entry.maxTokens === undefined ? {} : { outputTokenLimit: entry.maxTokens }),
-      supportedGenerationMethods: ['generateContent', 'streamGenerateContent'],
-    })),
+    models: entries.map((entry) => {
+      /* 同样不给缺席留口子：Gemini SDK 用这两个值填它自己的表单。 */
+      const contextWindow = typeof entry.contextWindow === 'number' && entry.contextWindow > 0 ? entry.contextWindow : 128000
+      const maxTokens = typeof entry.maxTokens === 'number' && entry.maxTokens > 0 ? entry.maxTokens : 8192
+      return {
+        name: `models/${entry.id}`,
+        displayName: entry.name ?? entry.id,
+        description: '',
+        inputTokenLimit: contextWindow,
+        outputTokenLimit: maxTokens,
+        supportedGenerationMethods: ['generateContent', 'streamGenerateContent'],
+      }
+    }),
   }
 }
 

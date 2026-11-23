@@ -216,6 +216,14 @@ export async function handleMessages(req, res, env) {
         usage.output_tokens = event.usage.outputTokens ?? usage.output_tokens
         continue
       }
+      if (event.type === 'failure') {
+        /* 上游失败：按 Anthropic 的 error 事件报，然后结束。 */
+        const failure = failureOf(event.error)
+        closeBlock()
+        sse.event('error', { type: 'error', error: { type: anthropicErrorType(failure.status), message: failure.message } })
+        sse.end()
+        return
+      }
       if (event.type === 'finish') {
         closeBlock()
         sse.event('message_delta', {

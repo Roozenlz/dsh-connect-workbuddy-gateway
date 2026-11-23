@@ -460,6 +460,131 @@ console.log('\n== 空清单的 key 明确报错 ==')
   check('409', response.status === 409, String(response.status))
   const body = await response.json()
   check('错误码', body.error?.code === 'model_not_configured', JSON.stringify(body))
+  /* 恢复清单：后面的用例都要用。 */
+  const state = await adminGet('/state')
+  const glm = state.body.available.find((model) => model.modelId === 'glm-5.3')
+  await adminPost('/keys/update', { id: firstId, selections: [{ ...glm, accountId: '' }] })
+}
+
+console.log('\n== Responses 流式必须符合 OpenAI 规范 ==')
+{
+  /*
+   * 这条来自真实故障：Coopanion（以及任何强类型客户端）报「服务已应答，但响应
+   * 格式不兼容」。根因是流里缺 `sequence_number` —— 那是标准字段，不是某个
+   * 客户端的私有要求。用 tests/responses-spec.mjs 按官方事件契约逐条验。
+   */
+  const { validateResponsesStream, parseSseEvents } = await import('./responses-spec.mjs')
+
+  const cases = [
+    ['纯文本', PLAIN],
+    ['带工具调用', TOOLS],
+    ['只有文本没有思考', [{ type: 'block-start', index: 0, blockType: 'text' }, { type: 'text-delta', index: 0, text: 'hi' }, { type: 'block-end', index: 0, block: { type: 'text', text: 'hi' } }, { type: 'usage', usage: { inputTokens: 3, outputTokens: 1 } }, { type: 'finish', reason: { kind: 'stop' } }]],
+    ['上游不报 usage', [{ type: 'text-delta', index: 0, text: 'x' }, { type: 'finish', reason: { kind: 'stop' } }]],
+  ]
+
+  for (const [label, chunks] of cases) {
+    nextChunks = chunks
+    const response = await fetch(`${API}/v1/responses`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${firstKey}` },
+      body: JSON.stringify({ model: 'glm-5.3', stream: true, input: 'hi' }),
+    })
+    const text = await response.text()
+    const events = parseSseEvents(text)
+    check(`${label}：能解析出事件`, events.length > 0, String(events.length))
+    const problems = validateResponsesStream(events)
+    check(`${label}：符合规范`, problems.length === 0, problems.slice(0, 4).join(' | '))
+  }
+}
+
+console.log('\n== 模型条目必须给出上下文与输出上限（缺失则用默认值）==')
+{
+  /*
+   * cc-switch 的「获取模型列表」会把这两个值填进它自己的表单；字段缺席就是空白
+   * 一栏。所以宁可给保守默认值也不能省略。
+   */
+  const response = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
+  const body = await response.json()
+  const entry = body.data[0]
+  for (const field of ['context_window', 'context_length', 'context_tokens', 'max_context_tokens', 'max_input_tokens']) {
+    check(`${field} 是数字`, typeof entry[field] === 'number', JSON.stringify(entry[field]))
+  }
+  for (const field of ['max_output_tokens', 'max_completion_tokens']) {
+    check(`${field} 是数字`, typeof entry[field] === 'number', JSON.stringify(entry[field]))
+  }
+  check('limit.context', typeof entry.limit?.context === 'number')
+  check('limit.output', typeof entry.limit?.output === 'number')
+  check('input_modalities', Array.isArray(entry.input_modalities))
+  check('supports_vision 是布尔', typeof entry.supports_vision === 'boolean')
+  check('reasoning_efforts 是数组', Array.isArray(entry.reasoning_efforts))
+}
+
+console.log('\n== Anthropic 目录也带完整元信息 ==')
+{
+  const response = await fetch(`${API}/v1/models`, {
+    headers: { 'x-api-key': firstKey, 'anthropic-version': '2023-06-01' },
+  })
+  const body = await response.json()
+  const entry = body.data[0]
+  check('context_window', typeof entry.context_window === 'number', JSON.stringify(entry))
+  check('max_input_tokens', typeof entry.max_input_tokens === 'number')
+  check('max_output_tokens', typeof entry.max_output_tokens === 'number')
+}
+
+console.log('\n== Gemini 目录也带 token 上限 ==')
+{
+  const response = await fetch(`${API}/v1beta/models`, { headers: { 'x-goog-api-key': firstKey } })
+  const body = await response.json()
+  const entry = body.models[0]
+  check('inputTokenLimit', typeof entry.inputTokenLimit === 'number', JSON.stringify(entry))
+  check('outputTokenLimit', typeof entry.outputTokenLimit === 'number')
+}
+
+console.log('\n== 上游异常中断必须发 response.failed，不能伪装成功 ==')
+{
+  /*
+   * 真实故障：上游 429 时流被切断，旧版本在 `hostStream` 里补了一个伪造的
+   * `{kind:'stop'}`，于是客户端收到「response.created + response.in_progress 之后
+   * 什么都没有」的残流 —— 既不是成功也不是失败，强类型客户端判格式不兼容。
+   */
+  const { validateResponsesStream, parseSseEvents } = await import('./responses-spec.mjs')
+
+  /* 情况 A：上游报了错误 chunk。 */
+  nextChunks = [
+    { type: 'text-delta', index: 0, text: '半截' },
+    { type: 'finish', reason: { kind: 'error', failure: { message: 'rate limited', code: 'RATE_LIMIT', status: 429 } } },
+  ]
+  const failed = await fetch(`${API}/v1/responses`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${firstKey}` },
+    body: JSON.stringify({ model: 'glm-5.3', stream: true, input: 'hi' }),
+  })
+  const failedText = await failed.text()
+  const failedEvents = parseSseEvents(failedText)
+  check('有 terminal 事件', failedEvents.some((event) => event.type === 'response.failed'), JSON.stringify(failedEvents.map((e) => e.type)))
+  check('带错误信息', failedEvents.some((event) => event.type === 'response.failed' && typeof event.response?.error?.message === 'string'))
+  check('符合规范', validateResponsesStream(failedEvents).length === 0, validateResponsesStream(failedEvents).slice(0, 3).join(' | '))
+
+  /* 情况 B：流自己结束，没有 finish chunk（模拟上游直接断流）。 */
+  nextChunks = [{ type: 'text-delta', index: 0, text: '半截' }]
+  const truncated = await fetch(`${API}/v1/responses`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${firstKey}` },
+    body: JSON.stringify({ model: 'glm-5.3', stream: true, input: 'hi' }),
+  })
+  const truncatedEvents = parseSseEvents(await truncated.text())
+  check('断流也是 failed', truncatedEvents.some((event) => event.type === 'response.failed'), JSON.stringify(truncatedEvents.map((e) => e.type)))
+  check('断流也符合规范', validateResponsesStream(truncatedEvents).length === 0, validateResponsesStream(truncatedEvents).slice(0, 3).join(' | '))
+
+  /* 情况 C：同一场景下 Chat 协议必须是错误，不能是空成功。 */
+  nextChunks = [{ type: 'text-delta', index: 0, text: '半截' }]
+  const chatTruncated = await keyPost('/v1/chat/completions', firstKey, {
+    model: 'glm-5.3',
+    stream: true,
+    messages: [{ role: 'user', content: 'hi' }],
+  })
+  const chatText = await chatTruncated.text()
+  check('Chat 断流带 error 帧', chatText.includes('"error"'), chatText.slice(-200))
 }
 
 console.log('\n== OpenAI Chat 流式 + 工具 ==')

@@ -206,6 +206,13 @@ export async function handleChat(req, res, env) {
         sse.data({ id, object: 'chat.completion.chunk', created, model: modelName, choices: [], usage: openAiUsage(event.usage) })
         continue
       }
+      if (event.type === 'failure') {
+        /* 上游失败：发一个 error 帧并结束，不发 [DONE] —— 那会被当成正常完成。 */
+        const failure = failureOf(event.error)
+        sse.data({ error: { message: failure.message, type: failure.code, code: failure.code } })
+        sse.end()
+        return
+      }
       if (event.type === 'finish') {
         sse.data(envelope({}, openAiFinishReason(event.reason, sawToolCalls)))
       }
