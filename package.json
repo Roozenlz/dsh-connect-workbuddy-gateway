@@ -48,7 +48,6 @@
     "src",
     "cordis.patch.yml",
     "locale",
-    "docs",
     "icon.svg",
     "README.md",
     "LICENSE"

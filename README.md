@@ -63,9 +63,7 @@ git clone https://github.com/Roozenlz/dsh-connect-workbuddy-gateway
 dsh-connect-workbuddy-gateway
 ```
 
-> ⚠️ **当前尚未在 npm 上可用。** 本包曾以 `2.1.0` 发布，为把首次公开版本对齐到
-> `1.0.0` 而整包删除；npm 对整包删除有 24 小时重发冷却，之后会以 `1.0.0` 发布。
-> 在此之前请用 A 或 B。
+> 已发布：`1.0.1`（`latest`）。`1.0.0` 也在，两者的差别只是发布渠道，功能相同。
 
 **D. 从插件市场**
 
@@ -353,16 +351,18 @@ Responses 流的规范校验（`sequence_number`、part 一致性、terminal 的
 推一个与 `package.json` 版本号一致的 tag：
 
 ```bash
-# package.json 里是 1.0.0 就推 v1.0.0
-git tag v1.0.0
-git push origin v1.0.0
+# package.json 里是 1.0.1 就推 v1.0.1
+git tag v1.0.1
+git push origin v1.0.1
 ```
 
 `.github/workflows/publish.yml` 会校验 tag 与版本一致、跑一遍自测，然后发布。
 
-**凭据走 OIDC，仓库里不存任何 npm token。** 这需要先在 npm 上配对一次：
+**凭据走 OIDC，仓库里不存任何 npm token。** 已验证可用：`1.0.1` 由 CI 发布，npm 记录的
+发布者是 `GitHub Actions` 而不是某个账号。配置方式：
 
-> `https://www.npmjs.com/package/<包名>/access` → Trusted Publisher → GitHub Actions
+> `https://www.npmjs.com/package/dsh-connect-workbuddy-gateway/access`
+> → Trusted Publisher → GitHub Actions
 >
 > | 字段 | 值 |
 > |---|---|
@@ -371,7 +371,11 @@ git push origin v1.0.0
 > | Workflow name | `publish.yml` |
 > | Environment | 留空 |
 >
-> 勾选 `npm publish` 权限。配好后状态是 **Pending validation**，需要发布一次才算生效。
+> 勾选 `npm publish` 权限。配好后状态是 **Pending validation**，成功发布一次才会变成已验证。
+
+**关于日志里的 `NODE_AUTH_TOKEN`**：GitHub 会为 `actions/setup-node` 注入一个脱敏占位值，
+日志显示为 `XXXXX-XXXXX-XXXXX-XXXXX`。那不代表仓库里存了 token —— `gh secret list` 为空
+即可确认。真正生效的凭据是 OIDC 当场换取的。
 
 为什么不用 token：npm 已宣布「绕过 2FA 的 token」将在 2027 年 1 月起不能用于发布，
 而且长期 token 一旦泄漏就等于交出发布权。
