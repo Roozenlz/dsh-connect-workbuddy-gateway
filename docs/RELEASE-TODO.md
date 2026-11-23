@@ -23,7 +23,7 @@ Trusted Publisher 是挂在包上的元数据，整包删除后一起消失（�
 ### 1. 确认可重发
 
 ```bash
-npm view dsh-workbuddy-gateway --registry=https://registry.npmjs.org/
+npm view dsh-connect-workbuddy-gateway --registry=https://registry.npmjs.org/
 # 不再是 E404 "Unpublished on ..." 即可
 ```
 
@@ -44,7 +44,7 @@ npm publish --registry=https://registry.npmjs.org/ --access public
 浏览器打开：
 
 ```
-https://www.npmjs.com/package/dsh-workbuddy-gateway/access
+https://www.npmjs.com/package/dsh-connect-workbuddy-gateway/access
 ```
 
 Trusted Publisher → GitHub Actions，填：
@@ -52,7 +52,7 @@ Trusted Publisher → GitHub Actions，填：
 | 字段 | 值 |
 |---|---|
 | Organization | `Roozenlz` |
-| Repository | `dsh-workbuddy-gateway` |
+| Repository | `dsh-connect-workbuddy-gateway` |
 | Workflow name | `publish.yml` |
 | Environment | 留空 |
 

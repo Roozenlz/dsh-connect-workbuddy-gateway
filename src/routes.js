@@ -4,7 +4,7 @@
  * 两类路由，前缀分开，互不打扰：
  *
  *   `/workbuddy-gateway/*`        对外 API（四种协议），靠 API key 鉴权
- *   `/plugins/dsh-workbuddy-gateway/*`  设置页用的管理接口，靠 DSH 自己的 loopback 闸门
+ *   `/plugins/dsh-connect-workbuddy-gateway/*`  设置页用的管理接口，靠 DSH 自己的 loopback 闸门
  *
  * 对外 API 用 `kind:'prefix'` 的 node 原生 handler（`(req,res)`）而不是 `resource`
  * 形式：SSE 必须边收边写，`resource` 要求先把完整 `Response` 攒出来，等于把流式
@@ -28,7 +28,7 @@ import { describeEndpoints, stripApiPrefix } from './endpoints.js'
 import { allPoolHealth, poolStateMtime } from './health.js'
 
 const PREFIX = '/workbuddy-gateway'
-const ADMIN_PREFIX = '/plugins/dsh-workbuddy-gateway'
+const ADMIN_PREFIX = '/plugins/dsh-connect-workbuddy-gateway'
 
 /**
  * 注册全部路由。

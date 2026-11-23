@@ -1,4 +1,4 @@
-# dsh-workbuddy-gateway
+# dsh-connect-workbuddy-gateway
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![DeepSeek Harness](https://img.shields.io/badge/DeepSeek%20Harness-plugin-2f6df6)](https://github.com/deepseek-ai/deepseek-harness)
@@ -15,7 +15,7 @@ WorkBuddy 模型（国内版 + 国际版）开放成一个**本机可调用的 H
 你的应用（Codex / Claude Code / Cline / 任意 SDK）
         │  OpenAI Chat · OpenAI Responses · Anthropic Messages · Gemini
         ▼
-  dsh-workbuddy-gateway        ← 本插件：协议转换 + 按 key 的模型清单
+  dsh-connect-workbuddy-gateway        ← 本插件：协议转换 + 按 key 的模型清单
         │
         ▼
   dsh-connect-workbuddy        ← 负责登录、凭据、换号、渠道指纹、积分
@@ -47,20 +47,20 @@ dsh plugin install dsh-connect-workbuddy
 **A. 从 Git 仓库（当前可用，推荐）**
 
 ```
-https://github.com/Roozenlz/dsh-workbuddy-gateway
+https://github.com/Roozenlz/dsh-connect-workbuddy-gateway
 ```
 
 **B. 从本地目录**
 
 ```bash
-git clone https://github.com/Roozenlz/dsh-workbuddy-gateway
+git clone https://github.com/Roozenlz/dsh-connect-workbuddy-gateway
 # 然后在 Add plugin 里填这个目录的绝对路径
 ```
 
 **C. 从 npm**
 
 ```
-dsh-workbuddy-gateway
+dsh-connect-workbuddy-gateway
 ```
 
 > ⚠️ **当前尚未在 npm 上可用。** 本包曾以 `2.1.0` 发布，为把首次公开版本对齐到
@@ -367,7 +367,7 @@ git push origin v1.0.0
 > | 字段 | 值 |
 > |---|---|
 > | Organization | `Roozenlz` |
-> | Repository | `dsh-workbuddy-gateway` |
+> | Repository | `dsh-connect-workbuddy-gateway` |
 > | Workflow name | `publish.yml` |
 > | Environment | 留空 |
 >
@@ -402,7 +402,7 @@ npm pack --dry-run          # 看清会打包哪些文件
 2. **整包删除后有 24 小时冷却。** 删掉整个包之后，同名包 24 小时内不能重新发布：
 
    ```
-   403 dsh-workbuddy-gateway cannot be republished until 24 hours have passed
+   403 dsh-connect-workbuddy-gateway cannot be republished until 24 hours have passed
    ```
 
    只删单个版本时，该版本号也会在 24 小时内不可重用。

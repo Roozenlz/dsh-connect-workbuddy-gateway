@@ -19,14 +19,14 @@
  */
 
 window.__ModuleLoader__.load({
-  id: 'dsh-workbuddy-gateway',
+  id: 'dsh-connect-workbuddy-gateway',
   factory(require) {
     const React = require('react')
     const h = React.createElement
     const { useState, useEffect, useCallback, useRef, useMemo } = React
 
     const NS = 'workbuddy-gateway'
-    const ADMIN = '/plugins/dsh-workbuddy-gateway'
+    const ADMIN = '/plugins/dsh-connect-workbuddy-gateway'
 
     /* ── 文案 ───────────────────────────────────────────────────────── */
 

@@ -7,11 +7,11 @@
 #   短期凭据：没有密钥可泄漏，也不会过期。
 #
 # 前置条件（只需配一次，见 README 的「首次发布」）：
-#   在 https://www.npmjs.com/package/dsh-workbuddy-gateway/access 配置
+#   在 https://www.npmjs.com/package/dsh-connect-workbuddy-gateway/access 配置
 #   Trusted Publisher：
 #     Publisher:        GitHub Actions
 #     Organization:     Roozenlz
-#     Repository:       dsh-workbuddy-gateway
+#     Repository:       dsh-connect-workbuddy-gateway
 #     Workflow name:    publish.yml
 #     Environment:      （留空，或与本文件的 environment 保持一致）
 #

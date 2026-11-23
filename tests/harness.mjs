@@ -161,7 +161,7 @@ function check(label, condition, detail) {
 /* `ORIGIN` 是根（协议的默认形状）；`API` 是旧前缀别名，用于验证兼容性。 */
 const ORIGIN = origin
 const API = `${origin}/workbuddy-gateway`
-const ADMIN = `${origin}/plugins/dsh-workbuddy-gateway`
+const ADMIN = `${origin}/plugins/dsh-connect-workbuddy-gateway`
 
 async function adminGet(path) {
   const response = await fetch(`${ADMIN}${path}`)
