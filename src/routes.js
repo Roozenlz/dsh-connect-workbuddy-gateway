@@ -19,7 +19,7 @@ import { handleChat } from './openai-chat.js'
 import { handleResponses } from './openai-responses.js'
 import { handleMessages } from './anthropic.js'
 import { handleGenerate, parseGeminiPath, geminiCatalog } from './gemini.js'
-import { collectModels, directModelsByRegion, openAiCatalog } from './models.js'
+import { collectModels, directModelsByRegion, openAiCatalog, narrowToPolicy } from './models.js'
 import { readConfig, writeConfig, makeKey, normalizePolicy, normalizeConfig, newSecret, maskSecret, POLICY_MODES } from './config.js'
 import { allAccounts } from './accounts.js'
 import { regionOfProvider, providerOfRegion } from './resolve.js'
@@ -80,6 +80,15 @@ async function dispatchApi(req, res, ctx, env) {
    * 相同；归一到路由表那一层，下面只写一套。
    */
   const route = stripApiPrefix(path)
+  /*
+   * 模型列表现在有两个语义相同的入口，但**响应体形状必须按客户端来**：
+   * Anthropic SDK 请求 `/v1/models` 时期待 `{data:[{type,id,display_name,…}]}`，
+   * 给它 OpenAI 的 `{object:'list',data:[…]}` 会被判成"响应格式不兼容"。
+   *
+   * 判据是「请求里带没带 anthropic-version」——那是 Anthropic SDK 的固定行为，
+   * 也是三家鉴权头里唯一能区分调用方的信号。没带就当 OpenAI 处理。
+   */
+  const wantsAnthropicShape = typeof req.headers['anthropic-version'] === 'string'
   try {
     if (route === '/healthz' || route === '/') {
       const info = describeEndpoints(originOf(ctx))
@@ -94,11 +103,15 @@ async function dispatchApi(req, res, ctx, env) {
     }
     if (method === 'GET' && route === '/models') {
       /*
-       * 目录按这把 key 的可见范围裁剪：`enableGlobal` 关掉时不列国际版，
-       * 否则客户端会在一个永远 400 的模型上反复重试。
+       * 目录按这把 key 的策略收窄：钉死模型的 key 只列出那一个模型。
+       * 否则客户端会让用户从 9 个里挑，而挑哪个最后都走同一个模型。
        */
-      const entries = await catalogEntries(env)
-      sendJson(res, 200, openAiCatalog(entries, env.config))
+      const entries = narrowToPolicy(keyEntry, await catalogEntries(env)) ?? await catalogEntries(env)
+      if (wantsAnthropicShape) {
+        sendJson(res, 200, anthropicCatalog(entries))
+        return
+      }
+      sendJson(res, 200, openAiCatalog(entries, { images: env.config.images !== false }))
       return
     }
     if (method === 'GET' && route === '/accounts') {
@@ -114,7 +127,7 @@ async function dispatchApi(req, res, ctx, env) {
       return
     }
     if (method === 'GET' && (route === '/v1beta/models' || route === '/models/gemini')) {
-      const entries = await catalogEntries(env)
+      const entries = narrowToPolicy(keyEntry, await catalogEntries(env)) ?? await catalogEntries(env)
       sendJson(res, 200, geminiCatalog(entries.map((entry) => ({
         id: entry.id,
         name: entry.name,
@@ -368,6 +381,33 @@ function isLoopbackAddress(value) {
 }
 
 /* ── 杂项 ─────────────────────────────────────────────────────────────── */
+
+/**
+ * Anthropic 形状的模型列表。
+ *
+ * Anthropic SDK 读的是 `{ data: [{ type, id, display_name, created_at }] }`；
+ * 给它 OpenAI 的 `object: 'list'` 会被判成格式不兼容。上下文与输出上限放在
+ * 标准字段之外并列给出，认识它们的客户端能用上，不认识的会忽略。
+ */
+function anthropicCatalog(entries) {
+  return {
+    data: entries.map((entry) => {
+      const contextWindow = typeof entry.contextWindow === 'number' && entry.contextWindow > 0 ? entry.contextWindow : undefined
+      const maxTokens = typeof entry.maxTokens === 'number' && entry.maxTokens > 0 ? entry.maxTokens : undefined
+      return {
+        type: 'model',
+        id: entry.id,
+        display_name: entry.name ?? entry.id,
+        created_at: new Date(0).toISOString(),
+        ...(contextWindow === undefined ? {} : { context_window: contextWindow, max_input_tokens: contextWindow }),
+        ...(maxTokens === undefined ? {} : { max_output_tokens: maxTokens }),
+      }
+    }),
+    has_more: false,
+    first_id: entries.length === 0 ? null : entries[0].id,
+    last_id: entries.length === 0 ? null : entries[entries.length - 1].id,
+  }
+}
 
 async function catalogEntries(env) {
   const host = await collectModels(env)

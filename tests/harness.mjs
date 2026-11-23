@@ -277,6 +277,78 @@ console.log('\n== 模型目录不带区域前缀 ==')
   check('region 字段', body.data[0].region !== undefined, JSON.stringify(body.data[0]))
 }
 
+console.log('\n== 模型条目必须带齐客户端要填的表单字段 ==')
+{
+  /*
+   * 真实反馈：客户端拿到了 9 个模型，但「最大输出 / 上下文上限 / 是否接受图片」
+   * 三栏全是空的。原因是老投影只给了 id 与 object。
+   */
+  const state = await adminGet('/state')
+  const id = state.body.keys[0].id
+  await adminPost('/keys/update', { id, policy: { mode: 'dsh' } })
+  const response = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
+  const entry = (await response.json()).data[0]
+  check('contextWindow（camelCase）', typeof entry.contextWindow === 'number', JSON.stringify(entry))
+  check('context_window（snake）', typeof entry.context_window === 'number', JSON.stringify(entry))
+  check('max_input_tokens（LiteLLM）', typeof entry.max_input_tokens === 'number')
+  check('limit.context（OpenRouter）', typeof entry.limit?.context === 'number')
+  check('max_output_tokens', typeof entry.max_output_tokens === 'number', JSON.stringify(entry))
+  check('limit.output', typeof entry.limit?.output === 'number')
+  check('input_modalities', Array.isArray(entry.input_modalities), JSON.stringify(entry.input_modalities))
+  check('supports_vision', typeof entry.supports_vision === 'boolean')
+  check('reasoning', typeof entry.reasoning === 'boolean', JSON.stringify(entry.reasoning))
+}
+
+console.log('\n== 钉死模型的 key 只列出那一个模型 ==')
+{
+  const state = await adminGet('/state')
+  const id = state.body.keys[0].id
+  await adminPost('/keys/update', { id, policy: { mode: 'named', provider: 'workbuddy', model: 'glm-5.3' } })
+
+  const narrowed = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
+  const body = await narrowed.json()
+  check('只有一个模型', body.data.length === 1, JSON.stringify(body.data.map((row) => row.id)))
+  check('就是钉死的那个', body.data[0].id === 'glm-5.3', body.data[0].id)
+
+  /* 换成另一把 key 的模型，列表要跟着变。 */
+  await adminPost('/keys/update', { id, policy: { mode: 'named', provider: 'workbuddy-global', model: 'kimi-k3' } })
+  const again = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
+  const body2 = await again.json()
+  check('换策略后跟着变', body2.data.length === 1 && body2.data[0].id === 'kimi-k3', JSON.stringify(body2.data.map((row) => row.id)))
+
+  /* 跟随型策略仍给全量目录。 */
+  await adminPost('/keys/update', { id, policy: { mode: 'dsh' } })
+  const full = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
+  check('跟随型给全量', (await full.json()).data.length === 4, 'expected 4')
+}
+
+console.log('\n== Anthropic 形状的模型列表 ==')
+{
+  /*
+   * Anthropic SDK 请求 /v1/models 时期待 `data:[{type,id,display_name}]`；
+   * 给它 OpenAI 的 `object:'list'` 就是"响应格式不兼容"。
+   * 判据是 anthropic-version 头。
+   */
+  const state = await adminGet('/state')
+  const id = state.body.keys[0].id
+  await adminPost('/keys/update', { id, policy: { mode: 'dsh' } })
+
+  const anthropic = await fetch(`${API}/v1/models`, {
+    headers: { 'x-api-key': firstKey, 'anthropic-version': '2023-06-01' },
+  })
+  const body = await anthropic.json()
+  check('200', anthropic.status === 200, String(anthropic.status))
+  check('data 数组', Array.isArray(body.data), JSON.stringify(body).slice(0, 120))
+  check('type: model', body.data[0]?.type === 'model', JSON.stringify(body.data[0]))
+  check('display_name', typeof body.data[0]?.display_name === 'string')
+  check('没有 object:list', body.object === undefined, String(body.object))
+  check('has_more', body.has_more === false)
+
+  const openai = await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
+  const openaiBody = await openai.json()
+  check('不带 anthropic 头仍是 OpenAI 形状', openaiBody.object === 'list', String(openaiBody.object))
+}
+
 console.log('\n== key 策略：dsh（默认）==')
 {
   nextChunks = PLAIN

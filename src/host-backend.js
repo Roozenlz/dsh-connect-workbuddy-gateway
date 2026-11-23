@@ -69,21 +69,37 @@ export function statusOfFailure(failure) {
   }
 }
 
-/** 模型目录（带上下文窗口）。 */
+/**
+ * 模型目录（带上下文窗口、输出上限、模态与推理档）。
+ *
+ * `maxTokens` 的兜底顺序是刻意的：WorkBuddy 的 adapter 把上游的 `maxTokens`
+ * 报成 `defaultMaxTokens`，但那是「这次请求默认输出多少」，不是「模型最多能
+ * 输出多少」——上游没给后者时它是空的。客户端拿不到输出上限就只能让用户手填，
+ * 所以这里在缺值时退到上下文窗口的一个保守比例，并在字段名上说明这是估算。
+ */
 export async function hostCatalog(ctx, provider) {
   const models = await listModels(ctx, provider)
   const detailed = await Promise.all(models.map(async (entry) => {
     const info = await resolveModelInfo(ctx, provider, entry.id)
+    const contextWindow = positiveInt(info?.contextWindow)
+    const declared = positiveInt(info?.defaultMaxTokens)
+    /* 上游没报输出上限时，按上下文窗口的 1/8 估一个（常见的输出占比）。 */
+    const estimated = contextWindow === undefined ? undefined : Math.max(1024, Math.floor(contextWindow / 8))
     return {
       id: entry.id,
       name: entry.name ?? entry.id,
-      contextWindow: info?.contextWindow,
-      maxTokens: info?.defaultMaxTokens,
+      contextWindow,
+      maxTokens: declared ?? estimated,
+      maxTokensEstimated: declared === undefined && estimated !== undefined,
       inputModalities: info?.inputModalities,
       reasoning: info?.reasoning,
     }
   }))
   return detailed
+}
+
+function positiveInt(value) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : undefined
 }
 
 export { withStatus }
