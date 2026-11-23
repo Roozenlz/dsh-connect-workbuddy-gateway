@@ -326,9 +326,17 @@ window.__ModuleLoader__.load({
       const [query, setQuery] = useState('')
 
       /* 勾选键：`accountId\u0000modelId`，与后端 normalizeSelections 一致。 */
-      const keyOf = (accountId, modelId) => `${accountId}\u0000${modelId}`
+      /*
+       * 一条勾选的稳定身份。
+       *
+       * **必须带 region。** 默认账号在两个区的 `accountId` 都是 `''`；只按
+       * `(accountId, modelId)` 去重，勾「国内版默认账号的 X」时「国际版默认账号
+       * 的 X」会跟着变成选中状态 —— 用户要的就是区分这两个。
+       */
+      const keyOf = (accountId, modelId, region) => `${accountId}\u0000${modelId}\u0000${region ?? ''}`
+      const keyOfRow = (row) => keyOf(row.accountId ?? '', row.modelId, row.region)
       const selectedKeys = useMemo(
-        () => new Set(selected.map((row) => keyOf(row.accountId ?? '', row.modelId))),
+        () => new Set(selected.map(keyOfRow)),
         [selected],
       )
 
@@ -388,17 +396,17 @@ window.__ModuleLoader__.load({
           .sort((a, b) => (a.sort - b.sort) || String(a.accountName ?? '').localeCompare(String(b.accountName ?? '')))
       }, [available, accounts, query])
 
-      const toggle = (accountId, model) => {
-        const key = keyOf(accountId, model.modelId)
+      const toggle = (group, model) => {
+        const key = keyOf(group.accountId, model.modelId, group.region)
         if (selectedKeys.has(key)) {
-          onChange(selected.filter((row) => keyOf(row.accountId ?? '', row.modelId) !== key))
+          onChange(selected.filter((row) => keyOfRow(row) !== key))
           return
         }
         onChange([
           ...selected,
           {
-            accountId,
-            region: model.region,
+            accountId: group.accountId,
+            region: group.region,
             modelId: model.modelId,
             displayName: model.displayName,
             ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
@@ -411,15 +419,15 @@ window.__ModuleLoader__.load({
 
       const selectAllShown = () => {
         const added = [...selected]
-        const have = new Set(added.map((row) => keyOf(row.accountId ?? '', row.modelId)))
+        const have = new Set(added.map(keyOfRow))
         for (const group of groups) {
           for (const model of group.models) {
-            const key = keyOf(group.accountId, model.modelId)
+            const key = keyOf(group.accountId, model.modelId, group.region)
             if (have.has(key)) continue
             have.add(key)
             added.push({
               accountId: group.accountId,
-              region: model.region,
+              region: group.region,
               modelId: model.modelId,
               displayName: model.displayName,
               ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
@@ -454,14 +462,14 @@ window.__ModuleLoader__.load({
                 h('span', { className: group.region === 'global' ? 'wbg-badge wbg-badge-global' : 'wbg-badge' },
                   group.region === 'global' ? t.regionGlobal : t.regionCn),
                 h('span', { className: 'wbg-spacer' }),
-                h('span', { style: { fontWeight: 400 } }, `${group.models.filter((model) => selectedKeys.has(keyOf(group.accountId, model.modelId))).length}/${group.models.length}`),
+                h('span', { style: { fontWeight: 400 } }, `${group.models.filter((model) => selectedKeys.has(keyOf(group.accountId, model.modelId, group.region))).length}/${group.models.length}`),
               ),
               group.models.map((model) => {
-                const key = keyOf(group.accountId, model.modelId)
+                const key = keyOf(group.accountId, model.modelId, group.region)
                 const checked = selectedKeys.has(key)
                 const efforts = Array.isArray(model.reasoningEfforts) ? model.reasoningEfforts : []
                 return h('label', { key, className: 'wbg-opt' },
-                  h('input', { type: 'checkbox', checked, onChange: () => toggle(group.accountId, model) }),
+                  h('input', { type: 'checkbox', checked, onChange: () => toggle(group, model) }),
                   h('span', { className: 'wbg-opt-label', title: model.modelId }, model.modelId),
                   h('span', { className: 'wbg-opt-meta' },
                     efforts.length === 0 ? '' : `${t.reasoning}: ${efforts.join('/')}`),

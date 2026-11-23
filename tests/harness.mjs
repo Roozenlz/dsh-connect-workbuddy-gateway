@@ -283,7 +283,7 @@ console.log('\n== 模型列表只返回勾选的模型 ==')
   check('输出上限', body.data[0].max_output_tokens === 8192, String(body.data[0].max_output_tokens))
 }
 
-console.log('\n== 重名模型：英文账号名当后缀 ==')
+console.log('\n== 重名模型：默认账号用区域、具名账号用昵称 ==')
 {
   await adminPost('/keys/update', {
     id: firstId,
@@ -295,9 +295,40 @@ console.log('\n== 重名模型：英文账号名当后缀 ==')
   const body = await (await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })).json()
   const ids = body.data.map((row) => row.id).sort()
   check('两条', ids.length === 2, JSON.stringify(ids))
-  check('默认账号保留裸名', ids.includes('glm-5.3'), JSON.stringify(ids))
+  /*
+   * 重名时**没有任何一条享受「裸名特权」**：默认账号那条也带后缀。
+   * 否则 `glm-5.3` 与 `glm-5.3@pony` 并列，用户不知道前者是哪个账号的。
+   */
+  check('默认账号带区域后缀', ids.includes('glm-5.3@cn'), JSON.stringify(ids))
   check('英文昵称当后缀', ids.includes('glm-5.3@pony'), JSON.stringify(ids))
   check('后缀全 ASCII', ids.every((id) => /^[\x20-\x7E]+$/u.test(id)), JSON.stringify(ids))
+}
+
+console.log('\n== 默认账号跨区同名必须分开（用户报的场景）==')
+{
+  /*
+   * 用户反馈：默认账号的同名模型，勾一个另一个跟着被选中，列表里只显示一个。
+   * 根因是去重键与命名都漏了 region —— 默认账号在两个区的 accountId 都是 ''。
+   */
+  await adminPost('/keys/update', {
+    id: firstId,
+    selections: [
+      { accountId: '', region: 'cn', modelId: 'glm-5.3', displayName: 'GLM-5.3' },
+      { accountId: '', region: 'global', modelId: 'glm-5.3', displayName: 'GLM-5.3' },
+    ],
+  })
+  const state = await adminGet('/state')
+  check('两条都存下来了', state.body.keys[0].selections.length === 2, String(state.body.keys[0].selections.length))
+
+  const body = await (await fetch(`${API}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })).json()
+  const ids = body.data.map((row) => row.id).sort()
+  check('列表里两行', ids.length === 2, JSON.stringify(ids))
+  check('国内版默认账号', ids.includes('glm-5.3@cn'), JSON.stringify(ids))
+  check('国际版默认账号', ids.includes('glm-5.3@intl'), JSON.stringify(ids))
+  check('名字唯一', new Set(ids).size === ids.length, JSON.stringify(ids))
+  /* 两行的 region 必须不同，客户端据此知道调的是哪个区。 */
+  const regions = body.data.map((row) => row.region).sort()
+  check('region 各自正确', regions[0] !== regions[1], JSON.stringify(regions))
 }
 
 console.log('\n== 重名模型：非 ASCII 账号名退化成序号 ==')
@@ -313,8 +344,10 @@ console.log('\n== 重名模型：非 ASCII 账号名退化成序号 ==')
   const ids = body.data.map((row) => row.id)
   check('两条', ids.length === 2, JSON.stringify(ids))
   check('英文昵称那个用昵称', ids.includes('glm-5.3@pony'), JSON.stringify(ids))
-  check('非 ASCII 那个用序号', ids.some((id) => /^glm-5\.3@#\d+$/u.test(id)), JSON.stringify(ids))
+  /* 非 ASCII 昵称退化时**先试区域后缀**（cn），再退到序号。 */
+  check('非 ASCII 那个可区分', ids.some((id) => /^glm-5\.3@(cn(-\d+)?|#\d+)$/u.test(id) && id !== 'glm-5.3@pony'), JSON.stringify(ids))
   check('没有非 ASCII 字符', ids.every((id) => /^[\x20-\x7E]+$/u.test(id)), JSON.stringify(ids))
+  check('名字唯一', new Set(ids).size === ids.length, JSON.stringify(ids))
 }
 
 console.log('\n== 请求按名字查表路由 ==')

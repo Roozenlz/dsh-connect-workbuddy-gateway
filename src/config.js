@@ -105,8 +105,13 @@ function normalizeKey(entry) {
 /**
  * 规整勾选清单。
  *
- * 去重是必须的：同一个 (账号, 模型) 勾两次会让模型列表出现两行同名项，
+ * 去重是必须的：同一个 (账号, 区域, 模型) 勾两次会让模型列表出现两行同名项，
  * 客户端选哪一个最后都是同一次调用——那是骗人的，所以在落盘时就消掉。
+ *
+ * **去重键必须带 region。** 默认账号的 `accountId` 是 `''`，两个区都是这个值；
+ * 只按 `(accountId, modelId)` 去重会把「国内版默认账号的 deepseek」和「国际版
+ * 默认账号的 deepseek」当成同一项，勾一个另一个跟着变，模型列表里也只剩一行 ——
+ * 用户就无法知道实际调的是哪个区。region 是这条身份的一部分，不能省。
  */
 export function normalizeSelections(value) {
   const out = []
@@ -117,7 +122,7 @@ export function normalizeSelections(value) {
     if (modelId === '') continue
     const accountId = typeof raw.accountId === 'string' ? raw.accountId.trim() : ''
     const region = raw.region === 'global' ? 'global' : raw.region === 'cn' ? 'cn' : undefined
-    const key = `${accountId}\u0000${modelId}`
+    const key = selectionKey(accountId, modelId, region)
     if (seen.has(key)) continue
     seen.add(key)
     out.push({
@@ -136,6 +141,20 @@ export function normalizeSelections(value) {
     })
   }
   return out
+}
+
+/**
+ * 一条勾选的稳定身份。
+ *
+ * **region 是身份的一部分。** 默认账号在两个区的 `accountId` 都是 `''`，少了
+ * region 就没法区分「国内版默认账号」与「国际版默认账号」。
+ *
+ * @param accountId 账号 id（默认账号为 `''`）
+ * @param modelId 上游模型 id
+ * @param region `cn` | `global` | undefined
+ */
+export function selectionKey(accountId, modelId, region) {
+  return `${accountId}\u0000${modelId}\u0000${region ?? ''}`
 }
 
 /** 原子写配置。 */

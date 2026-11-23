@@ -44,8 +44,11 @@ export function buildCatalog(selections, accounts) {
   const accountById = new Map((Array.isArray(accounts) ? accounts : []).map((account) => [account.id, account]))
 
   /*
-   * 先算出每个 (modelId) 出现了几次：只有重名的那几项才需要后缀。全都加后缀会
+   * 先算出每个 `modelId` 出现了几次：只有重名的那几项才需要后缀。全都加后缀会
    * 让单选一个模型的 key 也顶着一个没必要的尾巴。
+   *
+   * 这里按 modelId 统计（**不按 region**）：客户端看到的模型名是全局唯一的字符串，
+   * 两行同名就无法区分，哪怕它们属于不同区域。
    */
   const modelCounts = new Map()
   for (const selection of list) {
@@ -55,10 +58,14 @@ export function buildCatalog(selections, accounts) {
   /*
    * 后缀分配。规则按优先级：
    *
-   *   1. 默认账号（`accountId: ''`）那一条**保留裸名** —— 它是「跟随插件设置」
-   *      的那条，语义上最中性，客户端不写后缀也该能命中它。
+   *   1. **默认账号**（`accountId: ''`）在同名项之间用区域区分。默认账号在两个区
+   *      都存在时两个 `accountId` 都是 `''`，所以区域是唯一能分辨它们的信息。
    *   2. 其余项先试账号昵称，撞了或昵称不可用就换序号。
    *   3. 序号兜底保证唯一，且永远 ASCII。
+   *
+   * **不给任何一条「裸名特权」。** 早期版本让第一个默认账号保留裸名，结果是
+   * `deepseek-v4.1-flash` 与 `deepseek-v4.1-flash@intl` 并列 —— 用户看不出哪行
+   * 属于哪个区。现在只要同名就一律带后缀，两边对称。
    *
    * 名字必须稳定：同样的勾选永远得到同样的名字，否则客户端缓存的列表会在
    * 每次刷新后失效。
@@ -67,24 +74,43 @@ export function buildCatalog(selections, accounts) {
   const out = []
   let ordinal = 0
 
-  /* 先处理默认账号：它先占住裸名。 */
+  /* 先处理默认账号：它们先占名字。 */
   const ordered = [
     ...list.filter((selection) => selection.accountId === ''),
     ...list.filter((selection) => selection.accountId !== ''),
   ]
 
+  /** 区域的可读后缀。 */
+  const regionLabel = (region) => (region === 'global' ? 'intl' : 'cn')
+
   for (const selection of ordered) {
     ordinal += 1
     const duplicate = (modelCounts.get(selection.modelId) ?? 0) > 1
     const isDefault = selection.accountId === ''
+    const region = selection.region
     let name = selection.modelId
 
-    if (duplicate && !isDefault) {
-      const account = accountById.get(selection.accountId)
-      const readable = safeSuffixOf(account?.name)
+    /*
+     * 需要一个后缀的情况：
+     *   - 同名出现了多次（duplicate），或者
+     *   - 裸名已经被别人占了（兜底）。
+     */
+    const needsSuffix = duplicate || usedNames.has(selection.modelId)
+
+    if (needsSuffix) {
       const candidates = []
-      if (readable !== undefined) candidates.push(`${selection.modelId}${SUFFIX_SEPARATOR}${readable}`)
+      if (isDefault) {
+        /* 默认账号没有昵称，用区域名区分 —— 这是用户唯一能分辨的信息。 */
+        if (region !== undefined) candidates.push(`${selection.modelId}${SUFFIX_SEPARATOR}${regionLabel(region)}`)
+      } else {
+        const account = accountById.get(selection.accountId)
+        const readable = safeSuffixOf(account?.name)
+        if (readable !== undefined) candidates.push(`${selection.modelId}${SUFFIX_SEPARATOR}${readable}`)
+      }
+      /* 再加区域后缀，避免「同名 + 同昵称」（跨区同名账号）撞车。 */
+      if (region !== undefined) candidates.push(`${selection.modelId}${SUFFIX_SEPARATOR}${regionLabel(region)}-${ordinal}`)
       candidates.push(`${selection.modelId}${SUFFIX_SEPARATOR}#${ordinal}`)
+
       for (let index = 2; ; index += 1) {
         const attempt = candidates.find((candidate) => !usedNames.has(candidate) && candidate !== selection.modelId)
         if (attempt !== undefined) {
