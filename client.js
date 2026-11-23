@@ -439,18 +439,22 @@ window.__ModuleLoader__.load({
 
     /* ── 页面 ───────────────────────────────────────────────────────── */
 
+    /** 按浏览器语言定一次文案。 */
+    function textsFor() {
+      return (typeof navigator === 'object' && /^zh/i.test(navigator.language ?? '')) ? TEXT.zh : TEXT.en
+    }
+
     function GatewaySection() {
       const [state, setState] = useState(undefined)
       const [error, setError] = useState(undefined)
       const [busy, setBusy] = useState(false)
 
       /*
-       * 默认中文：这个插件的用户是国内 DSH 用户。宿主没有把 locale 透传到
-       * ownerProps，所以这里按浏览器语言判断一次；不做实时切换（用户切语言
-       * 重开设置页即可）。
+       * 宿主没有把 locale 快照透传到 ownerProps，所以这里按浏览器语言定一次。
+       * 不做实时切换：用户改语言后重开设置页即可，代价远小于为此接一套
+       * locale 订阅。
        */
-      const lang = (typeof navigator === 'object' && /^zh/i.test(navigator.language ?? '')) ? 'zh' : 'en'
-      const t = TEXT[lang]
+      const t = textsFor()
 
       const reload = useCallback(async () => {
         try {
@@ -569,7 +573,8 @@ window.__ModuleLoader__.load({
           name: 'settings.section',
           id: NS,
           order: 36,
-          label: () => TEXT.zh.title,
+          /* 每次投影都重读，语言跟着浏览器走，不需要重新注册。 */
+          label: () => textsFor().title,
         }, GatewaySection))
       },
     }
