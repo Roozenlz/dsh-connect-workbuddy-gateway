@@ -858,8 +858,15 @@ console.log('\n== 配置目录的解析规则 ==')
   const rel = resolveDataDir('my-keys')
   check('相对路径基于 DSH 主目录', rel.startsWith(home), rel)
 
-  const abs = resolveDataDir('D:\\gateway-keys')
-  check('绝对路径原样使用', abs === 'D:\\gateway-keys' || abs === 'D:/gateway-keys', abs)
+  /*
+   * 绝对路径的形态是**平台相关**的：Windows 认 `D:\x`，POSIX 认 `/x`。
+   * 拿 Windows 路径去断言 POSIX 平台必然失败 —— 所以按当前平台选形态，
+   * 而不是写死一个。
+   */
+  const absoluteInput = process.platform === 'win32' ? 'D:\\gateway-keys' : '/tmp/gateway-keys'
+  const abs = resolveDataDir(absoluteInput)
+  check('绝对路径原样使用', abs === absoluteInput, abs)
+  check('绝对路径不拼到 DSH 主目录下', !abs.startsWith(home), abs)
 
   /* 首尾空白要被吃掉，否则会建出一个带空格的目录名。 */
   const padded = resolveDataDir('  my-keys  ')
