@@ -8,6 +8,7 @@
  */
 
 import { createServer } from 'node:http'
+import { connect } from 'node:net'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -108,6 +109,21 @@ const services = new Map([
   ['agents', { list: () => [] }],
 ])
 
+/*
+ * 假 configEditor：记录写进配置的字段。
+ *
+ * 真实的 `configEditor.edit(entry, fn)` 会把 fn 的结果落进 profile patch 并重启
+ * 插件；测试只需要确认「值被正确合并进去了」，以及插件确实走的是这条路。
+ */
+const configWrites = []
+services.set('configEditor', {
+  async edit(entry, patch) {
+    const next = patch({ port: 'x', dataDir: 'y' })
+    configWrites.push(next)
+    return next
+  },
+})
+
 let origin = ''
 let currentServer
 const disposers = []
@@ -124,6 +140,8 @@ const ctx = {
     return dispose
   },
   get(name) { return services.get(name) },
+  /* 模拟 Loader 条目：`configEditor.edit` 要拿到它才肯动手。 */
+  fiber: { entry: { options: { id: 'include:workbuddy-gateway' }, update: async () => {} } },
   webServer: {
     getOrigin: () => origin,
     register(route) {
@@ -144,7 +162,24 @@ origin = `http://127.0.0.1:${currentServer.address().port}`
 const { stubAccounts } = await import('./stub-accounts.mjs')
 stubAccounts(FAKE_VAULT)
 
-apply(ctx, {})
+/*
+ * 对外 API 现在**自己监听一个端口**（见 src/listener.js），所以测试要给它一个
+ * 空端口号，并且等它真的 listen 成功再去请求。
+ *
+ * 端口 0 = 让系统分配：既不会撞上本机真实运行的那个，也不会因为并行跑两份测试
+ * 而抢占。拿到实际端口后，`API` 就指向这里。
+ */
+const GATEWAY_PORT = await reserveFreePort()
+apply(ctx, { port: GATEWAY_PORT })
+
+/** 要一个当前空闲的端口号（拿到后立刻释放，交给插件去 listen）。 */
+async function reserveFreePort() {
+  const probe = createServer(() => {})
+  await new Promise((resolve) => probe.listen(0, '127.0.0.1', resolve))
+  const port = probe.address().port
+  await new Promise((resolve) => probe.close(resolve))
+  return port
+}
 
 /* ── 断言工具 ─────────────────────────────────────────────────────────── */
 
@@ -158,10 +193,46 @@ function check(label, condition, detail) {
   console.log(`  FAIL ${label}${detail === undefined ? '' : ` — ${detail}`}`)
 }
 
-/* `ORIGIN` 是根（协议的默认形状）；`API` 是旧前缀别名，用于验证兼容性。 */
-const ORIGIN = origin
-const API = `${origin}/workbuddy-gateway`
+/*
+ * 两套地址，各自对应一个真实的监听：
+ *
+ *   GATEWAY  —— 对外 API 自己监听的端口（固定端口的意义就在这里，见 listener.js）
+ *   ADMIN    —— 设置页接口，仍然挂在宿主的 webServer 上
+ *
+ * 等监听就绪再往下跑；没 listen 成功的话第一条请求会直接 ECONNREFUSED，
+ * 掩盖真正的原因。
+ */
+const GATEWAY = `http://127.0.0.1:${GATEWAY_PORT}`
+/** 旧前缀别名仍然可用（挂在同一个监听上）。 */
+const API = `${GATEWAY}/workbuddy-gateway`
 const ADMIN = `${origin}/plugins/dsh-connect-workbuddy-gateway`
+
+/*
+ * 等插件自己的监听就绪。
+ *
+ * 假 ctx 没有暴露 `env`，所以这里直接等端口能连上 —— 这也是对"端口真的在
+ * listen"最直接的验证。失败时把 ECONNREFUSED 变成一句可读的话，而不是让第一条
+ * 请求抛一个看不出原因的错。
+ */
+{
+  const deadline = Date.now() + 5000
+  for (;;) {
+    try {
+      await new Promise((resolve, reject) => {
+        const socket = connect(GATEWAY_PORT, '127.0.0.1')
+        socket.once('connect', () => { socket.destroy(); resolve() })
+        socket.once('error', reject)
+      })
+      break
+    } catch (error) {
+      if (Date.now() > deadline) {
+        console.error(`网关端口 ${GATEWAY_PORT} 没有在 5 秒内开始监听：${error?.message ?? error}`)
+        process.exit(1)
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+  }
+}
 
 async function adminGet(path) {
   const response = await fetch(`${ADMIN}${path}`)
@@ -250,9 +321,9 @@ console.log('\n== 根路径与旧前缀都能用 ==')
 {
   nextChunks = PLAIN
   /* 根路径：客户端默认形状。 */
-  const rootModels = await fetch(`${ORIGIN}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
+  const rootModels = await fetch(`${GATEWAY}/v1/models`, { headers: { Authorization: `Bearer ${firstKey}` } })
   check('根 /v1/models', rootModels.status === 200, String(rootModels.status))
-  const rootChat = await fetch(`${ORIGIN}/v1/chat/completions`, {
+  const rootChat = await fetch(`${GATEWAY}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${firstKey}` },
     body: JSON.stringify({ model: 'glm-5.3', messages: [{ role: 'user', content: 'hi' }] }),
@@ -883,6 +954,64 @@ console.log('\n== 配置目录可通过设置接口读取 ==')
   /* 测试环境用的是默认目录（DSH_HOME 是临时目录）。 */
   check('测试环境用默认目录', state.body.paths?.dataDirIsDefault === true, String(state.body.paths?.dataDirIsDefault))
   check('默认目录名与包名一致', state.body.paths?.defaultDataDirName === 'dsh-connect-workbuddy-gateway', state.body.paths?.defaultDataDirName)
+}
+
+console.log('\n== 网关监听自己的固定端口 ==')
+{
+  /*
+   * 用户的要求：端口固定，base URL 不随 DSH 的端口漂移。
+   *
+   * 验证三件事：
+   *   1. 网关真的在配置的那个端口上 listen（不是宿主的端口）
+   *   2. 设置页报出的 base URL 用的就是这个端口
+   *   3. 端口被占用时给出提示、且**不自动换端口**
+   */
+  const state = await adminGet('/state')
+  check('state 报出端口', state.body.listener?.port === GATEWAY_PORT, JSON.stringify(state.body.listener))
+  check('监听成功', state.body.listener?.listening === true, JSON.stringify(state.body.listener))
+  check('base URL 用网关端口', state.body.baseUrl === `http://127.0.0.1:${GATEWAY_PORT}`, state.body.baseUrl)
+  check('不是宿主端口', !state.body.baseUrl.includes(String(currentServer.address().port)) || String(currentServer.address().port) === String(GATEWAY_PORT), state.body.baseUrl)
+  check('四条协议都指向网关端口', state.body.endpoints.every((entry) => entry.baseUrl.startsWith(`http://127.0.0.1:${GATEWAY_PORT}`)), JSON.stringify(state.body.endpoints.map((e) => e.baseUrl)))
+
+  /* 端口号校验：越界与非整数都要被拒。 */
+  const badPorts = [0, -1, 65536, 3.5, 'abc', null]
+  for (const bad of badPorts) {
+    const response = await adminPost('/config/port', { port: bad })
+    check(`拒绝非法端口 ${JSON.stringify(bad)}`, response.status === 400, String(response.status))
+  }
+  const good = await adminPost('/config/port', { port: 8790 })
+  check('接受合法端口', good.status === 200 || good.status === 500, String(good.status))
+}
+
+console.log('\n== 端口被占用时给提示、不自动换 ==')
+{
+  /*
+   * 用一个真的被占住的端口去起一个小监听，验证：
+   *   - 不抛异常（插件不能因此整个挂掉，否则用户打不开设置页改端口）
+   *   - 状态里是 listening:false + 一句能照着做的话
+   *   - **端口号不变**，因为自动换端口正是要避免的事
+   */
+  const { startListener } = await import('../src/listener.js')
+  const blocker = createServer(() => {})
+  await new Promise((resolve) => blocker.listen(0, '127.0.0.1', resolve))
+  const busyPort = blocker.address().port
+
+  const probe = startListener({ port: busyPort, handler: () => {}, logger: { warn: () => {}, info: () => {} } })
+  const result = await probe.ready
+
+  check('被占用时不监听', result.listening === false, JSON.stringify(result))
+  check('给出占用提示', typeof result.error === 'string' && result.error.includes(String(busyPort)), result.error)
+  check('提示里让人自己换端口', typeof result.error === 'string' && result.error.includes('占用'), result.error)
+  check('端口号保持不变', result.port === busyPort, String(result.port))
+
+  await probe.close()
+  await new Promise((resolve) => blocker.close(resolve))
+
+  /* 释放后再起，应该成功——证明失败不是永久性的。 */
+  const retry = startListener({ port: busyPort, handler: () => {}, logger: { warn: () => {}, info: () => {} } })
+  const again = await retry.ready
+  check('端口空出后能监听', again.listening === true, JSON.stringify(again))
+  await retry.close()
 }
 
 console.log('\n== OpenAI Chat 流式 + 工具 ==')

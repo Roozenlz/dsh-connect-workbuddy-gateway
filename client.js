@@ -69,6 +69,18 @@ window.__ModuleLoader__.load({
         storageSaved: '已保存，插件会重新加载以生效',
         storageWarn: '换目录后，原目录里的 key 不会自动带过来。',
         storageEmptyUses: '留空时使用默认目录：',
+        /* 监听端口 */
+        port: '监听端口',
+        portHint: '网关自己监听这个端口，base URL 固定为它，不随 DSH 的端口变化。',
+        portCurrent: '当前端口',
+        portListening: '正在监听',
+        portNotListening: '未在监听',
+        portSave: '保存端口',
+        portSaved: '已保存，插件会重新加载',
+        portPlaceholder: '例如 8790',
+        portRange: '填 1–65535 之间的整数。改动后下游应用的 base URL 也要跟着改。',
+        portBusy: '端口被占用',
+        portBusyHint: '换一个端口后保存。网关不会自己换端口，因为那样 base URL 会变。',
         selected: '已选',
         noneSelected: '还没有勾选任何模型，这把 key 暂时不能用。',
         willExpose: '客户端会看到',
@@ -137,6 +149,18 @@ window.__ModuleLoader__.load({
         storageSaved: 'Saved; the plugin reloads to apply it',
         storageWarn: 'Keys in the previous directory are not copied over.',
         storageEmptyUses: 'Empty uses the default directory:',
+        /* Listening port */
+        port: 'Listen port',
+        portHint: 'The gateway listens on this port itself, so the base URL stays here and does not follow the DSH port.',
+        portCurrent: 'Current port',
+        portListening: 'listening',
+        portNotListening: 'not listening',
+        portSave: 'Save port',
+        portSaved: 'Saved; the plugin reloads to apply it',
+        portPlaceholder: 'e.g. 8790',
+        portRange: 'An integer from 1 to 65535. Downstream apps need their base URL updated after a change.',
+        portBusy: 'Port in use',
+        portBusyHint: 'Pick another port and save. The gateway will not move on its own, because that would change the base URL.',
         selected: 'selected',
         noneSelected: 'No models ticked yet, so this key cannot be used.',
         willExpose: 'The client will see',
@@ -217,6 +241,8 @@ window.__ModuleLoader__.load({
 .wbg-badge-count{color:var(--dsw-alias-brand-primary,#2f6df6);border-color:currentColor}
 .wbg-badge-global{color:var(--dsw-alias-brand-primary,#2f6df6);border-color:currentColor}
 .wbg-badge-cn{color:var(--dsw-alias-state-success-primary,#1a7f37);border-color:currentColor}
+.wbg-badge-ok{color:var(--dsw-alias-state-success-primary,#1a7f37);border-color:currentColor}
+.wbg-badge-warn{color:var(--dsw-alias-state-error-primary,#c0392b);border-color:currentColor}
 .wbg-secret{display:flex;align-items:center;gap:8px;background:var(--dsw-alias-bg-layer-2,#f6f6f6);border:1px solid var(--dsw-alias-border-l1,#eee);border-radius:8px;padding:8px 11px}
 .wbg-secret code{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary,#666);letter-spacing:.3px}
 .wbg-secret-live code{color:var(--dsw-alias-label-primary,#1a1a1a);letter-spacing:0}
@@ -763,6 +789,100 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /* ── 监听端口 ───────────────────────────────────────────────────── */
+
+    /**
+     * 端口卡片。
+     *
+     * 这里是「base URL 固定」这个需求的落点：端口不再跟着 DSH 走，而是插件自己
+     * listen。占用时**不自动换**——自动换会让 base URL 又变，正是要避免的事——
+     * 改为在这里显示原因，让用户自己挑一个新端口。
+     */
+    function PortCard({ state, t, onSave }) {
+      const listener = state?.listener ?? {}
+      const [value, setValue] = useState(String(listener.port ?? ''))
+      const [busy, setBusy] = useState(false)
+      const [error, setError] = useState(undefined)
+      const [saved, setSaved] = useState(false)
+
+      useEffect(() => {
+        if (busy || saved) return
+        setValue(String(listener.port ?? ''))
+      }, [listener.port])
+
+      const commit = async () => {
+        setBusy(true)
+        setError(undefined)
+        try {
+          await onSave(value)
+          setSaved(true)
+          setTimeout(() => setSaved(false), 4000)
+        } catch (caught) {
+          setError(String(caught.message ?? caught))
+        } finally {
+          setBusy(false)
+        }
+      }
+
+      const busyNow = listener.listening !== true
+
+      return h('div', { className: 'wbg-card wbg-card-soft' },
+        h('div', { className: 'wbg-row' },
+          h('strong', { className: 'wbg-sec-title' }, t.port),
+          h('span', { className: 'wbg-spacer' }),
+          h('span', { className: 'wbg-caption' }, t.portHint),
+        ),
+
+        h('div', { className: 'wbg-field' },
+          h('span', null, t.portCurrent),
+          h('span', { className: 'wbg-mono' },
+            String(listener.port ?? '?'),
+            h('span', {
+              className: busyNow ? 'wbg-badge wbg-badge-warn' : 'wbg-badge wbg-badge-ok',
+              style: { marginLeft: 8 },
+            }, busyNow ? t.portNotListening : t.portListening),
+          ),
+        ),
+
+        /* 端口被占用时的提示：说清原因 + 让人自己换。 */
+        busyNow ? h('div', { className: 'wbg-alert wbg-alert-error' },
+          h('span', { className: 'wbg-alert-icon', 'aria-hidden': true }, '!'),
+          h('div', { className: 'wbg-alert-body' },
+            h('div', null, t.portBusy),
+            h('p', { className: 'wbg-caption', style: { margin: '2px 0 0' } }, listener.error ?? ''),
+            h('p', { className: 'wbg-caption', style: { margin: '2px 0 0' } }, t.portBusyHint),
+          ),
+        ) : null,
+
+        h('div', { className: 'wbg-field' },
+          h('span', null, t.portRange),
+          h('input', {
+            className: 'wbg-input',
+            value,
+            inputMode: 'numeric',
+            placeholder: t.portPlaceholder,
+            'aria-label': t.port,
+            onChange: (event) => setValue(event.target.value),
+          }),
+        ),
+
+        error === undefined ? null : h('div', { className: 'wbg-alert wbg-alert-error' },
+          h('span', { className: 'wbg-alert-icon', 'aria-hidden': true }, '!'),
+          h('span', { className: 'wbg-alert-body' }, error)),
+
+        h('div', { className: 'wbg-row' },
+          saved ? h('span', { className: 'wbg-caption' }, t.portSaved) : null,
+          h('span', { className: 'wbg-spacer' }),
+          h('button', {
+            type: 'button',
+            className: 'wbg-btn wbg-btn-primary',
+            onClick: commit,
+            disabled: busy,
+          }, t.portSave),
+        ),
+      )
+    }
+
     /* ── 页面 ───────────────────────────────────────────────────────── */
 
     function GatewaySection() {
@@ -840,6 +960,18 @@ window.__ModuleLoader__.load({
        */
       const saveDataDir = useCallback(async (dataDir) => {
         await adminPost('/config/data-dir', { dataDir })
+        await reload()
+      }, [reload])
+
+      /*
+       * 保存监听端口。
+       *
+       * 后端会把值校验成 1–65535 的整数再写进插件配置，然后插件重启、在新端口上
+       * listen。占用与否只有重启后才知道，所以这里不等结果，让设置页下一次刷新
+       * （每 30 秒，或用户手动刷新）去反映真实状态。
+       */
+      const savePort = useCallback(async (port) => {
+        await adminPost('/config/port', { port: Number(port) })
         await reload()
       }, [reload])
 
@@ -937,6 +1069,7 @@ window.__ModuleLoader__.load({
           h('pre', { className: 'wbg-code wbg-mono' }, curlExample),
         ),
 
+        h(PortCard, { state, t, onSave: savePort }),
         h(StorageCard, { state, t, onSave: saveDataDir }),
 
         created === undefined ? null : h(SecretDialog, {

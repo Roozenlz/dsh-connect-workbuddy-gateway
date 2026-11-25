@@ -78,7 +78,7 @@ DSH 的 **Plugins → Discover** 只显示已配置索引源里的条目。本�
    点 **显示明文** 拿到 secret
 
 ```bash
-curl http://127.0.0.1:9055/v1/chat/completions \
+curl http://127.0.0.1:8790/v1/chat/completions \
   -H "Authorization: Bearer wbg-..." \
   -H "Content-Type: application/json" \
   -d '{"model":"<从 /v1/models 里选>","messages":[{"role":"user","content":"你好"}]}'
@@ -88,22 +88,59 @@ curl http://127.0.0.1:9055/v1/chat/completions \
 
 ## Base URL
 
-**就是 DSH 自己的地址，没有自定义路径前缀。**
+网关**自己监听一个固定端口**，默认 `8790`。
 
 | 协议 | Base URL | 客户端示例 |
 |---|---|---|
-| OpenAI Chat Completions | `http://127.0.0.1:9055/v1` | Codex、Cline、任意 OpenAI SDK |
-| OpenAI Responses | `http://127.0.0.1:9055/v1` | Codex（`wire_api = "responses"`） |
-| Anthropic Messages | `http://127.0.0.1:9055` | Claude Code（`ANTHROPIC_BASE_URL`） |
-| Gemini | `http://127.0.0.1:9055` | Google GenAI SDK |
+| OpenAI Chat Completions | `http://127.0.0.1:8790/v1` | Codex、Cline、任意 OpenAI SDK |
+| OpenAI Responses | `http://127.0.0.1:8790/v1` | Codex（`wire_api = "responses"`） |
+| Anthropic Messages | `http://127.0.0.1:8790` | Claude Code（`ANTHROPIC_BASE_URL`） |
+| Gemini | `http://127.0.0.1:8790` | Google GenAI SDK |
 
 为什么 Anthropic 和 Gemini 给根而不给 `/v1`：它们的 SDK 会自己拼
 `/v1/messages`、`/v1beta/models/...`，给了 `/v1` 就拼成 `/v1/v1/messages`。
 
+### 为什么不是 DSH 的端口
+
+早期版本把 API 挂在 DSH 的 webServer 上，于是 base URL 跟着 DSH 的端口跑：换个启动
+参数、或端口被占用后宿主自己往后挪一位，用户就得挨个改下游应用的配置。
+
+现在网关**自己 listen**，与宿主端口解耦。端口一变，所有下游配置都得跟着改——所以它
+是固定的。
+
+### 端口被占用时
+
+**不会自动换端口**（换了 base URL 又变了，正是要避免的事）。设置页会显示：
+
+```
+监听端口  8791  未在监听
+端口被占用
+端口 8791 已被其他程序占用。请在本页把端口改成另一个值（例如 8792）后保存。
+```
+
+换一个端口、保存，插件重启后在新端口上监听。改端口后下游应用的 base URL 也要跟着改
+一次。
+
+也可以直接改 profile 的那一行：
+
+```yaml
+- id: workbuddy-gateway
+  name: dsh-connect-workbuddy-gateway
+  config:
+    port: 8790        # 1–65535
+```
+
+> **注意**：设置页接口仍挂在 DSH 的 webServer 上（浏览器要同源），所以那个界面跟着
+> DSH 的地址走；**只有对外 API 在固定端口上**。
+
+---
+
+## 路径前缀
+
+协议端点直接挂在根路径（`/v1/chat/completions` 这种），没有自定义前缀。
+
 > 旧版本用的 `/workbuddy-gateway` 前缀**仍然可用**（作为别名保留），已经填过的客户端
 > 不会失效。
-
-根路径是逐条精确注册的，不会碰 DSH 自己的 `/api`、`/plugins` 与前端资源。
 
 ---
 
@@ -252,6 +289,7 @@ hy4flash-free@#9       ← 昵称含中文/emoji，退化成序号
 - 每把 key：名称、启停，以及**按账号分组的模型勾选**（带搜索、全选、清空）
 - 直接列出「客户端会看到的名字」，重名后缀一目了然
 - 账号不可用时给出警告条与恢复时间
+- **监听端口**：查看当前端口与监听状态，端口被占用时在此改
 - **存储位置**：查看并修改配置目录
 - 底部一条 `curl` 示例
 
@@ -354,8 +392,9 @@ hy4flash-free@#9       ← 昵称含中文/emoji，退化成序号
 node tests/harness.mjs
 ```
 
-覆盖 176 项：首次建 key 与惰性补选、鉴权、模型勾选与清单投影、重名后缀（区域 / 昵称 /
-非 ASCII 序号）、跨区同名、按名字路由、推理档透传、并行工具调用按 index 分组、
+覆盖 194 项：首次建 key 与惰性补选、鉴权、模型勾选与清单投影、重名后缀（区域 / 昵称 /
+非 ASCII 序号）、跨区同名、按名字路由、推理档透传、**固定监听端口与占用提示**、
+并行工具调用按 index 分组、
 Responses 流的规范校验（`sequence_number`、part 一致性、terminal 的 output 顺序）、
 上游失败与断流的诚实报告、账号可用性与恢复、四种协议的流式与非流式、工具调用三方言、
 图片输入。

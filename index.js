@@ -17,6 +17,7 @@
  */
 
 import { registerRoutes, baseUrlOf } from './src/routes.js'
+import { isValidPort } from './src/listener.js'
 import { workbuddyProviders } from './src/backend.js'
 import { closeDirect } from './src/direct.js'
 import { readConfig, writeConfig, makeKey, normalizeSelections, configPath, useDataDir } from './src/config.js'
@@ -28,6 +29,17 @@ export const name = 'workbuddy-gateway'
 export const inject = ['webServer']
 
 const DEFAULTS = {
+  /**
+   * 网关监听端口。
+   *
+   * **固定值，不跟随 DSH 的端口。** base URL 要填进别的应用（Codex、Claude Code、
+   * Cline……）的配置里，端口一变用户就得挨个改。所以插件自己 listen 一个端口，
+   * 与宿主解耦。
+   *
+   * 占用时**不会自动换**：自动换会让 base URL 又变了，正是要避免的事。改为在
+   * 设置页显示"端口被占用"，让用户自己改一个。
+   */
+  port: 8790,
   /**
    * 配置目录。
    *
@@ -57,6 +69,16 @@ const DEFAULTS = {
  */
 export function apply(ctx, config) {
   const settings = { ...DEFAULTS, ...(config ?? {}) }
+
+  /*
+   * 端口必须是合法整数。用户把 patch 手改成字符串或越界值时**钳回默认**，
+   * 而不是带着一个不能 listen 的值继续跑——后者只会得到一个莫名其妙的
+   * `ERR_SOCKET_BAD_PORT`，看不出是自己写错了配置。
+   */
+  if (!isValidPort(settings.port)) {
+    ctx.logger.warn(`workbuddy-gateway: port ${String(settings.port)} is not a valid TCP port, falling back to ${String(DEFAULTS.port)}`)
+    settings.port = DEFAULTS.port
+  }
 
   /*
    * **第一件事：定下数据目录。** 后面所有 readConfig / writeConfig 都用它。
@@ -123,7 +145,7 @@ export function apply(ctx, config) {
 
   ctx.effect(() => {
     const dispose = registerRoutes(ctx, env)
-    ctx.logger.info(`workbuddy-gateway: serving ${baseUrlOf(ctx)}`)
+    ctx.logger.info(`workbuddy-gateway: serving ${baseUrlOf(ctx, env)}`)
     return () => {
       dispose()
       void closeDirect()

@@ -38,6 +38,7 @@ import { allAccounts } from './accounts.js'
 import { regionOfProvider, providerOfRegion } from './resolve.js'
 import { describeEndpoints, stripApiPrefix } from './endpoints.js'
 import { allPoolHealth, poolStateMtime } from './health.js'
+import { startListener, describeListenError, isValidPort } from './listener.js'
 
 const PREFIX = '/workbuddy-gateway'
 const ADMIN_PREFIX = '/plugins/dsh-connect-workbuddy-gateway'
@@ -66,41 +67,12 @@ const ADMIN_PREFIX = '/plugins/dsh-connect-workbuddy-gateway'
  */
 export function registerRoutes(ctx, env) {
   const disposers = []
+
   /*
-   * 两个入口：根路径（协议默认形状）与旧前缀（兼容）。
-   *
-   * 根路径用 `exact` 逐条注册而不是一个大 prefix —— 这样完全不会碰到 DSH 的
-   * `/api`、`/plugins`、前端资源。`/v1beta/models/*:generateContent` 这种带冒号
-   * 的动态路径没法用 exact 表达，所以给 `/v1beta` 与 `/v1/models/` 各注册一个
-   * prefix，范围足够窄。
+   * **设置页仍然挂在宿主的 webServer 上。** 它必须跟着 DSH 的前端一起走 ——
+   * DSH 的页面从哪个 origin 加载，管理接口就得在哪个 origin，否则浏览器直接
+   * 被同源策略挡掉。
    */
-  const API_ROOTS = [
-    /* 协议端点：逐条精确。 */
-    '/v1/chat/completions',
-    '/v1/responses',
-    '/v1/messages',
-    '/v1/messages/count_tokens',
-    '/v1/models',
-    '/v1/accounts',
-    '/v1/models/list',
-    /* Gemini 的模型动作带冒号，只能用前缀。 */
-    { prefix: '/v1beta' },
-    /* 兼容：老 base URL 带 /workbuddy-gateway。 */
-    { prefix: PREFIX },
-  ]
-
-  for (const entry of API_ROOTS) {
-    const route = typeof entry === 'string'
-      ? { kind: 'exact', path: entry }
-      : { kind: 'prefix', path: entry.prefix }
-    disposers.push(ctx.webServer.register({
-      ...route,
-      handler: (req, res) => {
-        void dispatchApi(req, res, ctx, env)
-      },
-    }))
-  }
-
   disposers.push(ctx.webServer.register({
     kind: 'prefix',
     path: ADMIN_PREFIX,
@@ -108,8 +80,28 @@ export function registerRoutes(ctx, env) {
       void dispatchAdmin(req, res, ctx, env)
     },
   }))
+
+  /*
+   * **对外 API 走自己的监听端口**（见 src/listener.js），所以这里不再向宿主
+   * 注册 `/v1/...`。
+   *
+   * 早期版本把 API 也挂在宿主上，于是 base URL 跟着 DSH 的端口跑：宿主换端口
+   * （或被占用后自动挪位），用户就得改所有下游应用的配置。现在端口是插件自己的
+   * 配置项，固定下来。
+   */
+  const listener = startListener({
+    port: env.config.port,
+    handler: (req, res) => dispatchApi(req, res, ctx, env),
+    logger: ctx.logger,
+  })
+
+  /* 把监听状态交给路由层：设置页要显示"正在监听 / 端口被占用"。 */
+  env.listener = listener.state
+  env.listenerReady = listener.ready
+
   return () => {
     for (const dispose of disposers) dispose()
+    void listener.close()
   }
 }
 
@@ -149,7 +141,7 @@ async function dispatchApi(req, res, ctx, env) {
   const wantsAnthropicShape = typeof req.headers['anthropic-version'] === 'string'
   try {
     if (route === '/healthz' || route === '/') {
-      const info = describeEndpoints(originOf(ctx))
+      const info = describeEndpoints(originOf(ctx, env))
       sendJson(res, 200, {
         ok: true,
         root: info.root,
@@ -328,10 +320,7 @@ async function dispatchAdmin(req, res, ctx, env) {
        *
        * **不能只写进 keys.json** —— 那个文件就在被指向的目录里，改它等于让一个新
        * 文件去描述「以后该读哪个文件」，自相矛盾。所以这项写进插件配置
-       * （`cordis.patch.yml` 的那一行），由 settings 服务落盘，插件下次激活时
-       * `apply` 读到的就是新值。
-       *
-       * 这里只做校验与说明，真正的写入交给宿主。
+       * （`cordis.patch.yml` 的那一行）。
        */
       const body = await readJsonBody(req)
       const requested = typeof body?.dataDir === 'string' ? body.dataDir.trim() : ''
@@ -342,58 +331,9 @@ async function dispatchAdmin(req, res, ctx, env) {
         return
       }
 
-      const settings = ctx.get('settings')
-      if (settings === undefined) {
-        sendJson(res, 503, { error: 'this profile cannot save plugin configuration' })
-        return
-      }
-      /*
-       * 找到能落盘这条配置的地方。
-       *
-       * 两条路都试，顺序有讲究：
-       *
-       *   1. `configEditor.edit(entry, ...)` —— 本插件最该用的那条。它认得这一行，
-       *      保留 patch 里其它内容与注释，并且会重启插件让改动生效。
-       *   2. `settings.update(ns, ...)` —— 只在插件注册了设置页时可用。本插件
-       *      **没有**注册（`describe()` 里找不到它），所以这条基本走不通，保留是为了
-       *      将来加了设置页时自动能用上。
-       *
-       * 都不行就如实报错，让用户去改 patch —— 绝不自己去重写 cordis.patch.yml，
-       * 那个文件属于用户，里面有别人的行和注释。
-       */
-      const ownEntry = ctx.fiber?.entry
-      const editor = ctx.get('configEditor')
-      if (ownEntry !== undefined && editor?.edit !== undefined) {
-        try {
-          await editor.edit(ownEntry, (current) => ({ ...current, dataDir: requested }))
-          sendJson(res, 200, { ok: true, requested, via: 'configEditor' })
-          return
-        } catch (error) {
-          sendJson(res, 500, {
-            error: `could not save dataDir: ${error instanceof Error ? error.message : String(error)}`,
-            via: 'configEditor',
-          })
-          return
-        }
-      }
-
-      const configService = ctx.get('settings')
-      if (configService === undefined) {
-        sendJson(res, 503, { error: 'this profile cannot save plugin configuration; set dataDir in the profile patch instead' })
-        return
-      }
-      const ns = resolveSettingsNs(configService, env, PACKAGE_NAME)
-      if (ns === undefined) {
-        sendJson(res, 503, {
-          error: 'this plugin is not registered as a configurable entry in this profile; set dataDir in the profile patch by hand',
-          entryId: env.entryId ?? null,
-        })
-        return
-      }
-      try {
-        await configService.update(ns, { dataDir: requested })
-      } catch (error) {
-        sendJson(res, 500, { error: `could not save: ${error instanceof Error ? error.message : String(error)}` })
+      const saved = await savePluginConfig(ctx, env, { dataDir: requested }, 'dataDir')
+      if (saved.ok !== true) {
+        sendJson(res, saved.status, saved.error)
         return
       }
 
@@ -401,12 +341,42 @@ async function dispatchAdmin(req, res, ctx, env) {
        * 如实告诉用户发生了什么：新目录**不会**自动继承旧 key。与其让他下次打开
        * 设置页发现 key 全空，不如现在就说。
        */
-      const nextDir = requested === '' ? null : requested
       sendJson(res, 200, {
         ok: true,
         requested,
+        via: saved.via,
         note: 'the plugin reloads to apply this; keys in the previous directory are not copied over',
-        ...(nextDir === null ? {} : { pendingDataDir: nextDir }),
+      })
+      return
+    }
+    if (method === 'POST' && path === '/config/port') {
+      /*
+       * 改监听端口。
+       *
+       * 端口是**固定**的：占用时不自动换（换了 base URL 又得改下游配置），
+       * 所以这里只接受用户明确给的值，并在保存前把「新端口可能也被占用」这件事
+       * 说清楚——真正的占用检测只能等重启后 listen 才知道。
+       */
+      const body = await readJsonBody(req)
+      const raw = body?.port
+      const requested = typeof raw === 'string' && raw.trim() !== '' ? Number(raw.trim()) : raw
+      if (!isValidPort(requested)) {
+        sendJson(res, 400, {
+          error: `端口必须是 1–65535 之间的整数，收到 ${JSON.stringify(raw)}`,
+        })
+        return
+      }
+
+      const saved = await savePluginConfig(ctx, env, { port: requested }, 'port')
+      if (saved.ok !== true) {
+        sendJson(res, saved.status, saved.error)
+        return
+      }
+      sendJson(res, 200, {
+        ok: true,
+        requested,
+        via: saved.via,
+        note: `the plugin reloads and listens on ${requested}; if that port is taken, the settings page will say so and you pick another`,
       })
       return
     }
@@ -438,7 +408,7 @@ async function dispatchAdmin(req, res, ctx, env) {
  */
 async function adminState(ctx, env) {
   const config = readConfig()
-  const origin = originOf(ctx)
+  const origin = originOf(ctx, env)
   const accounts = publicAccounts(env)
   const regions = env.config.enableGlobal === false ? ['cn'] : ['cn', 'global']
   const health = allPoolHealth(regions)
@@ -464,9 +434,23 @@ async function adminState(ctx, env) {
 
   return {
     origin,
-    /* 根地址就是 DSH 自己的地址，不带自定义前缀。 */
+    /*
+     * 根地址是**网关自己的监听端口**，不是宿主的。端口固定，下游应用配置一次
+     * 就不用再改。
+     */
     baseUrl: origin,
     endpoints: describeEndpoints(origin).endpoints,
+    /*
+     * 监听状态。
+     *
+     * `listening: false` + `error` 是「端口被占用」的正常表现——插件不自动换端口
+     * （换了 base URL 又变），而是把原因和该怎么办交给用户。
+     */
+    listener: {
+      port: env.config.port,
+      listening: env.listener?.listening === true,
+      ...(env.listener?.error === undefined ? {} : { error: env.listener.error }),
+    },
     paths: configPathOf(env),
     providers: env.providers().map((provider) => ({
       id: provider,
@@ -638,8 +622,19 @@ async function catalogEntries(env) {
   return entries.filter((entry) => entry.region !== 'global')
 }
 
-/** 本机 origin（不含网关前缀），设置页据此拼出四种协议的地址。 */
-export function originOf(ctx) {
+/**
+ * 网关自己的地址。
+ *
+ * **不再是宿主的 origin**：对外 API 现在监听独立端口（见 src/listener.js），
+ * base URL 就固定在这个端口上，不随 DSH 的端口漂移。
+ *
+ * 端口一旦定下就不再变，即使监听失败也照常显示配置里的那个数——用户要看到的是
+ * "我配的是 8790"，配合旁边那条占用提示自己去改，而不是一个 0。
+ */
+export function originOf(ctx, env) {
+  const port = env?.config?.port
+  if (isValidPort(port)) return `http://127.0.0.1:${port}`
+  /* 兜底：没拿到配置时退回宿主 origin（正常流程走不到这里）。 */
   try {
     return ctx.webServer.getOrigin()
   } catch {
@@ -648,8 +643,8 @@ export function originOf(ctx) {
 }
 
 /** 不带协议后缀的基址，保留给需要「一条根地址」的场景。 */
-export function baseUrlOf(ctx) {
-  return `${originOf(ctx)}${PREFIX}`
+export function baseUrlOf(ctx, env) {
+  return originOf(ctx, env)
 }
 
 /**
@@ -715,6 +710,76 @@ function resolveSettingsNs(settings, env, packageName) {
 
 /** 本插件的包名，用于在 settings 目录里认出自己那一行。 */
 const PACKAGE_NAME = 'dsh-connect-workbuddy-gateway'
+
+/**
+ * 把一项配置写进本插件的 profile 条目。
+ *
+ * 两条路，顺序有讲究：
+ *
+ *   1. `configEditor.edit(entry, ...)` —— 本插件最该用的那条。它认得这一行，
+ *      保留 patch 里其它内容与注释，并且会重启插件让改动生效。
+ *   2. `settings.update(ns, ...)` —— 只在插件注册了设置页时可用。本插件
+ *      **没有**注册（`describe()` 里找不到它），所以这条基本走不通，保留是为了
+ *      将来加了设置页时自动能用上。
+ *
+ * 都不行就如实报错，让用户去改 patch —— 绝不自己去重写 cordis.patch.yml，
+ * 那个文件属于用户，里面有别人的行和注释。
+ *
+ * @param ctx Cordis 上下文
+ * @param env 插件环境
+ * @param patch 要合并进配置的字段（例如 `{ port: 8790 }`）
+ * @param field 字段名，只用于错误信息
+ * @returns `{ ok: true, via }` 或 `{ ok: false, status, error }`
+ */
+async function savePluginConfig(ctx, env, patch, field) {
+  const ownEntry = ctx.fiber?.entry
+  const editor = ctx.get('configEditor')
+  if (ownEntry !== undefined && editor?.edit !== undefined) {
+    try {
+      await editor.edit(ownEntry, (current) => ({ ...current, ...patch }))
+      return { ok: true, via: 'configEditor' }
+    } catch (error) {
+      return {
+        ok: false,
+        status: 500,
+        error: {
+          error: `could not save ${field}: ${error instanceof Error ? error.message : String(error)}`,
+          via: 'configEditor',
+        },
+      }
+    }
+  }
+
+  const configService = ctx.get('settings')
+  if (configService === undefined) {
+    return {
+      ok: false,
+      status: 503,
+      error: { error: `this profile cannot save plugin configuration; set ${field} in the profile patch instead` },
+    }
+  }
+  const ns = resolveSettingsNs(configService, env, PACKAGE_NAME)
+  if (ns === undefined) {
+    return {
+      ok: false,
+      status: 503,
+      error: {
+        error: `this plugin is not registered as a configurable entry in this profile; set ${field} in the profile patch by hand`,
+        entryId: env.entryId ?? null,
+      },
+    }
+  }
+  try {
+    await configService.update(ns, patch)
+    return { ok: true, via: 'settings' }
+  } catch (error) {
+    return {
+      ok: false,
+      status: 500,
+      error: { error: `could not save ${field}: ${error instanceof Error ? error.message : String(error)}`, via: 'settings' },
+    }
+  }
+}
 
 /** 跨平台的「这是个可用路径」判断（不含盘符以外的怪字符）。 */
 function isResolvablePath(value) {
